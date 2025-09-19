@@ -581,7 +581,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 for future in as_completed(future_to_task):
                     completed_count += 1
                     task = future_to_task[future]
-                    game_name = task['game_name']
+                    game_name = os.path.basename(task['recording_file'])
                     
                     try:
                         result = future.result()
