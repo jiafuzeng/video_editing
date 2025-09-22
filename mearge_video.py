@@ -5,55 +5,40 @@ from pathlib import Path
 import ffmpeg
 import folder_paths
 import shutil
+from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
+from .utils import generate_unique_folder_name, resolve_path
 
-class VideoMergeNode:
+class VideoMergeNode(ComfyNodeABC):
     """
     视频合并节点
-    将素材视频和游戏视频按照指定位置关系合并
+    将素材视频和主视频按照指定位置关系合并
     支持上下位置合并，自动处理尺寸和时间轴
     """
     
-    @classmethod
-    def get_input_folders(cls):
-        """获取输入目录下的所有子文件夹"""
-        try:
-            input_dir = folder_paths.get_input_directory()
-            if not os.path.exists(input_dir):
-                return ["input"]
-            
-            folders = ["input"]  # 默认包含根目录
-            for item in os.listdir(input_dir):
-                item_path = os.path.join(input_dir, item)
-                if os.path.isdir(item_path):
-                    folders.append(item)
-            
-            return sorted(folders)
-        except Exception:
-            return ["input"]
+    DESCRIPTION = "视频合并节点 - 支持相对路径和绝对路径"
+    CATEGORY = "video/video_editing"
     
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(cls) -> InputTypeDict:
         return {
             "required": {
-                "material_folder": (cls.get_input_folders(), {"default": "input", "tooltip": "选择素材视频所在的文件夹"}),
-                "game_folder": (cls.get_input_folders(), {"default": "input", "tooltip": "选择游戏视频所在的文件夹"}),
-                "position": (["up", "down"], {"default": "up", "tooltip": "up: 素材视频在上方, down: 素材视频在下方"}),
-                "audio_mode": (["game_only", "mix"], {"default": "game_only", "tooltip": "game_only: 只使用游戏音频, mix: 素材和游戏音频混音"}),
-                "material_audio_volume": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "素材音频音量占比 (0.0-2.0)"}),
-                "game_audio_volume": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "游戏音频音量占比 (0.0-2.0)"}),
-                "output_folder_name": ("STRING", {"default": "merged_videos", "multiline": False, "tooltip": "输出文件夹名称，合并后的视频将保存到此文件夹"}),
+                "upper_video_folder": (IO.STRING, {"default": "", "tooltip": "上方视频文件夹路径（支持相对路径和绝对路径）"}),
+                "lower_video_folder": (IO.STRING, {"default": "", "tooltip": "下方视频文件夹路径（支持相对路径和绝对路径）"}),
+                "main_video_source": (["upper", "lower"], {"default": "upper", "tooltip": "选择主体视频：upper=上方视频作为主视频, lower=下方视频作为主视频"}),
+                "audio_mode": (["main_only", "mix"], {"default": "main_only", "tooltip": "main_only: 只使用主视频音频, mix: 主视频和素材视频音频混音"}),
+                "main_audio_volume": (IO.FLOAT, {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "主视频音频音量占比 (0.0-2.0)"}),
+                "material_audio_volume": (IO.FLOAT, {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "素材视频音频音量占比 (0.0-2.0)"}),
+                "output_folder_prefix": (IO.STRING, {"default": "video_merge", "tooltip": "输出文件夹前缀"}),
             },
             "optional": {
-                "material_path": ("STRING", {"default": "", "multiline": False, "tooltip": "直接输入素材文件夹的完整路径，优先级高于下拉框选择"}),
-                "game_path": ("STRING", {"default": "", "multiline": False, "tooltip": "直接输入游戏文件夹的完整路径，优先级高于下拉框选择"}),
-                "gif_path": ("STRING", {"default": "", "multiline": False, "tooltip": "GIF动态图路径，如果存在则在素材和游戏视频结合处叠加显示"}),
+                "gif_path": (IO.STRING, {"default": "", "tooltip": "GIF文件夹路径（支持相对路径和绝对路径），GIF文件与主视频依次绑定，不足时循环使用"}),
             }
         }
     
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("output_paths",)
+    RETURN_TYPES = (IO.STRING,)
+    RETURN_NAMES = ("output_path",)
     FUNCTION = "merge_videos"
-    CATEGORY = "video_editing"
+    OUTPUT_NODE = True
     
     def get_video_info(self, video_path, threshold_db=-60.0):
         """获取视频信息"""
@@ -206,260 +191,158 @@ class VideoMergeNode:
             print(f"视频缩放失败 {input_path}: {str(e)}")
             return False
     
-    def merge_videos_vertically(self, material_path, game_path, output_path, position="up", audio_mode="game_only", material_audio_volume=0.5, game_audio_volume=0.5, gif_path=""):
+    def merge_videos_vertically(self, material_path, main_path, output_path, position="up", audio_mode="main_only", material_audio_volume=0.5, main_audio_volume=0.5, gif_path="", upper_video_path="", lower_video_path=""):
         """垂直合并视频"""
         try:
             # 获取视频信息用于调试
             material_info = self.get_video_info(material_path)
-            game_info = self.get_video_info(game_path)
+            main_info = self.get_video_info(main_path)
             
             print(f"垂直合并视频:")
             print(f"  素材: {os.path.basename(material_path)} (有音频: {material_info['has_audio'] if material_info else '未知'})")
-            print(f"  游戏: {os.path.basename(game_path)} (有音频: {game_info['has_audio'] if game_info else '未知'})")
+            print(f"  主视频: {os.path.basename(main_path)} (有音频: {main_info['has_audio'] if main_info else '未知'})")
             print(f"  位置: {position}, 音频模式: {audio_mode}")
             
-            # 根据位置确定视频顺序并合并
-            if position == "up":
-                # 素材在上，游戏在下
-                material_input = ffmpeg.input(material_path)
-                game_input = ffmpeg.input(game_path)
-                
-                # 使用vstack filter合并视频
-                video_output = ffmpeg.filter([material_input.video, game_input.video], 'vstack', inputs=2)
-                
-                # 检查是否需要叠加GIF
-                if gif_path and gif_path.strip() and os.path.exists(gif_path.strip()):
-                    print(f"  检测到GIF文件: {os.path.basename(gif_path)}")
-                    
-                    # 获取GIF信息
-                    gif_info = self.get_video_info(gif_path.strip())
-                    if not gif_info:
-                        print(f"  警告: 无法获取GIF信息，跳过GIF叠加")
-                    else:
-                        # 获取合并后视频的尺寸和时长
-                        material_height = material_info['height']
-                        game_height = game_info['height']
-                        video_width = material_info['width']  # 两个视频宽度相同
-                        total_height = material_height + game_height
-                        
-                        # 计算合并后视频的总时长（使用游戏视频时长）
-                        material_duration = material_info['duration']
-                        game_duration = game_info['duration']
-                        total_duration = game_duration  # 使用游戏视频时长作为目标时长
-                        
-                        print(f"  游戏视频时长: {game_duration:.2f}秒")
-                        print(f"  素材视频时长: {material_duration:.2f}秒")
-                        print(f"  目标合并时长: {total_duration:.2f}秒")
-                        print(f"  GIF原始时长: {gif_info['duration']:.2f}秒")
-                        
-                        # 计算GIF缩放后的高度（等比缩放）
-                        gif_original_width = gif_info['width']
-                        gif_original_height = gif_info['height']
-                        gif_new_height = int((video_width * gif_original_height) / gif_original_width)
-                        
-                        # 确保高度是偶数（视频编码要求）
-                        if gif_new_height % 2 != 0:
-                            gif_new_height += 1
-                        
-                        print(f"  GIF原始尺寸: {gif_original_width}x{gif_original_height}")
-                        print(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
-                        
-                        # 创建GIF输入
-                        gif_input = ffmpeg.input(gif_path.strip())
-                        
-                        # 使用loop filter实现真正的循环播放
-                        gif_looped = gif_input.video.filter('loop', loop=-1, size=32767, start=0)
-                        
-                        # 缩放GIF到与游戏视频相同的宽度
-                        gif_scaled = gif_looped.filter('scale', video_width, gif_new_height)
-                        
-                        # 计算GIF位置：在结合处居中显示
-                        # GIF的中心位置应该在结合处（material_height位置）
-                        gif_center_y = material_height
-                        
-                        # 叠加缩放后的GIF到视频上，使用shortest=1确保输出时长由游戏视频决定
-                        video_output = ffmpeg.filter([video_output, gif_scaled], 'overlay', 
-                                                   x='(W-w)/2',  # 水平居中
-                                                   y=f'{gif_center_y}-h/2',  # 垂直居中在结合处
-                                                   shortest=1)  # 输出时长由最短的输入决定（游戏视频）
-                        print(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由游戏视频决定")
-                        print(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
-                
-                # 根据音频模式处理音频
-                if audio_mode == "mix":
-                    # 混音模式：先检查音频状态
-                    print(f"  混音模式 - 素材音量: {material_audio_volume}, 游戏音量: {game_audio_volume}")
-                    
-                    # 检查素材和游戏视频的音频状态
-                    material_info = self.get_video_info(material_path)
-                    game_info = self.get_video_info(game_path)
-                    
-                    if not material_info or not game_info:
-                        print("  无法获取视频信息，使用游戏音频")
-                        audio_output = game_input.audio
-                    elif not material_info['has_audio'] and not game_info['has_audio']:
-                        # 两个视频都没有音频
-                        print("  错误：素材视频和游戏视频都没有音频，无法进行混音处理")
-                        raise ValueError("素材视频和游戏视频都没有音频，无法进行混音处理")
-                    elif not material_info['has_audio']:
-                        # 只有游戏视频有音频
-                        print("  素材视频没有音频，使用游戏音频")
-                        audio_output = game_input.audio
-                    elif not game_info['has_audio']:
-                        # 只有素材视频有音频
-                        print("  游戏视频没有音频，使用素材音频")
-                        audio_output = material_input.audio
-                    else:
-                        # 两个视频都有音频，进行混音
-                        print("  两个视频都有音频，进行混音处理")
-                        # 对素材音频应用音量调整
-                        material_audio_adjusted = material_input.audio.filter('volume', material_audio_volume)
-                        # 对游戏音频应用音量调整
-                        game_audio_adjusted = game_input.audio.filter('volume', game_audio_volume)
-                        
-                        # 使用amix filter混合音频
-                        audio_output = ffmpeg.filter([material_audio_adjusted, game_audio_adjusted], 'amix', inputs=2, duration='longest')
-                        print("  混音模式：成功创建混音")
-                else:
-                    # 只使用游戏音频
-                    print("  使用游戏音频")
-                    audio_output = game_input.audio
-                
-                # 输出合并后的视频
-                (
-                    ffmpeg
-                    .output(
-                        video_output,
-                        audio_output,
-                        output_path,
-                        vcodec='libx264',
-                        acodec='aac',
-                        audio_bitrate='128k',
-                        preset='medium'
-                    )
-                    .overwrite_output()
-                    .run(quiet=False)  # 显示详细错误信息
-                )
+            # 根据实际视频来源确定位置关系
+            # 上方视频文件夹的视频始终在上方，下方视频文件夹的视频始终在下方
+            if material_path == upper_video_path:
+                # 素材视频来自上方文件夹，主视频来自下方文件夹
+                # 上方视频在上，下方视频在下
+                upper_input = ffmpeg.input(material_path)  # 上方视频
+                lower_input = ffmpeg.input(main_path)      # 下方视频
+                print(f"  位置关系: 上方视频({os.path.basename(material_path)}) 在上，下方视频({os.path.basename(main_path)}) 在下")
             else:
-                # 游戏在上，素材在下
-                game_input = ffmpeg.input(game_path)
-                material_input = ffmpeg.input(material_path)
+                # 主视频来自上方文件夹，素材视频来自下方文件夹
+                # 上方视频在上，下方视频在下
+                upper_input = ffmpeg.input(main_path)      # 上方视频
+                lower_input = ffmpeg.input(material_path)  # 下方视频
+                print(f"  位置关系: 上方视频({os.path.basename(main_path)}) 在上，下方视频({os.path.basename(material_path)}) 在下")
+            
+            # 使用vstack filter合并视频（上方视频在上，下方视频在下）
+            video_output = ffmpeg.filter([upper_input.video, lower_input.video], 'vstack', inputs=2)
+            
+            # 检查是否需要叠加GIF
+            if gif_path and gif_path.strip() and os.path.exists(gif_path.strip()):
+                print(f"  检测到GIF文件: {os.path.basename(gif_path)}")
                 
-                # 使用vstack filter合并视频
-                video_output = ffmpeg.filter([game_input.video, material_input.video], 'vstack', inputs=2)
-                
-                # 检查是否需要叠加GIF
-                if gif_path and gif_path.strip() and os.path.exists(gif_path.strip()):
-                    print(f"  检测到GIF文件: {os.path.basename(gif_path)}")
-                    
-                    # 获取GIF信息
-                    gif_info = self.get_video_info(gif_path.strip())
-                    if not gif_info:
-                        print(f"  警告: 无法获取GIF信息，跳过GIF叠加")
-                    else:
-                        # 获取合并后视频的尺寸和时长
-                        material_height = material_info['height']
-                        game_height = game_info['height']
-                        video_width = game_info['width']  # 两个视频宽度相同
-                        
-                        # 计算合并后视频的总时长（使用游戏视频时长）
-                        material_duration = material_info['duration']
-                        game_duration = game_info['duration']
-                        total_duration = game_duration  # 使用游戏视频时长作为目标时长
-                        
-                        print(f"  游戏视频时长: {game_duration:.2f}秒")
-                        print(f"  素材视频时长: {material_duration:.2f}秒")
-                        print(f"  目标合并时长: {total_duration:.2f}秒")
-                        print(f"  GIF原始时长: {gif_info['duration']:.2f}秒")
-                        
-                        # 计算GIF缩放后的高度（等比缩放）
-                        gif_original_width = gif_info['width']
-                        gif_original_height = gif_info['height']
-                        gif_new_height = int((video_width * gif_original_height) / gif_original_width)
-                        
-                        # 确保高度是偶数（视频编码要求）
-                        if gif_new_height % 2 != 0:
-                            gif_new_height += 1
-                        
-                        print(f"  GIF原始尺寸: {gif_original_width}x{gif_original_height}")
-                        print(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
-                        
-                        # 创建GIF输入
-                        gif_input = ffmpeg.input(gif_path.strip())
-                        
-                        # 使用loop filter实现真正的循环播放
-                        gif_looped = gif_input.video.filter('loop', loop=-1, size=32767, start=0)
-                        
-                        # 缩放GIF到与游戏视频相同的宽度
-                        gif_scaled = gif_looped.filter('scale', video_width, gif_new_height)
-                        
-                        # 计算GIF位置：在结合处居中显示
-                        # GIF的中心位置应该在结合处（game_height位置）
-                        gif_center_y = game_height
-                        
-                        # 叠加缩放后的GIF到视频上，使用shortest=1确保输出时长由游戏视频决定
-                        video_output = ffmpeg.filter([video_output, gif_scaled], 'overlay', 
-                                                   x='(W-w)/2',  # 水平居中
-                                                   y=f'{gif_center_y}-h/2',  # 垂直居中在结合处
-                                                   shortest=1)  # 输出时长由最短的输入决定（游戏视频）
-                        print(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由游戏视频决定")
-                        print(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
-                
-                # 根据音频模式处理音频
-                if audio_mode == "mix":
-                    # 混音模式：先检查音频状态
-                    print(f"  混音模式 - 素材音量: {material_audio_volume}, 游戏音量: {game_audio_volume}")
-                    
-                    # 检查素材和游戏视频的音频状态
-                    material_info = self.get_video_info(material_path)
-                    game_info = self.get_video_info(game_path)
-                    
-                    if not material_info or not game_info:
-                        print("  无法获取视频信息，使用游戏音频")
-                        audio_output = game_input.audio
-                    elif not material_info['has_audio'] and not game_info['has_audio']:
-                        # 两个视频都没有音频
-                        print("  错误：素材视频和游戏视频都没有音频，无法进行混音处理")
-                        raise ValueError("素材视频和游戏视频都没有音频，无法进行混音处理")
-                    elif not material_info['has_audio']:
-                        # 只有游戏视频有音频
-                        print("  素材视频没有音频，使用游戏音频")
-                        audio_output = game_input.audio
-                    elif not game_info['has_audio']:
-                        # 只有素材视频有音频
-                        print("  游戏视频没有音频，使用素材音频")
-                        audio_output = material_input.audio
-                    else:
-                        # 两个视频都有音频，进行混音
-                        print("  两个视频都有音频，进行混音处理")
-                        # 对素材音频应用音量调整
-                        material_audio_adjusted = material_input.audio.filter('volume', material_audio_volume)
-                        # 对游戏音频应用音量调整
-                        game_audio_adjusted = game_input.audio.filter('volume', game_audio_volume)
-                        
-                        # 使用amix filter混合音频
-                        audio_output = ffmpeg.filter([material_audio_adjusted, game_audio_adjusted], 'amix', inputs=2, duration='longest')
-                        print("  混音模式：成功创建混音")
+                # 获取GIF信息
+                gif_info = self.get_video_info(gif_path.strip())
+                if not gif_info:
+                    print(f"  警告: 无法获取GIF信息，跳过GIF叠加")
                 else:
-                    # 只使用游戏音频
-                    print("  使用游戏音频")
-                    audio_output = game_input.audio
+                    # 获取合并后视频的尺寸和时长
+                    material_height = material_info['height']
+                    main_height = main_info['height']
+                    video_width = material_info['width']  # 两个视频宽度相同
+                    total_height = material_height + main_height
+                    
+                    # 计算合并后视频的总时长（使用主视频时长）
+                    material_duration = material_info['duration']
+                    main_duration = main_info['duration']
+                    total_duration = main_duration  # 使用主视频时长作为目标时长
+                    
+                    print(f"  主视频时长: {main_duration:.2f}秒")
+                    print(f"  素材视频时长: {material_duration:.2f}秒")
+                    print(f"  目标合并时长: {total_duration:.2f}秒")
+                    print(f"  GIF原始时长: {gif_info['duration']:.2f}秒")
+                    
+                    # 计算GIF缩放后的高度（等比缩放）
+                    gif_original_width = gif_info['width']
+                    gif_original_height = gif_info['height']
+                    gif_new_height = int((video_width * gif_original_height) / gif_original_width)
+                    
+                    # 确保高度是偶数（视频编码要求）
+                    if gif_new_height % 2 != 0:
+                        gif_new_height += 1
+                    
+                    print(f"  GIF原始尺寸: {gif_original_width}x{gif_original_height}")
+                    print(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
+                    
+                    # 创建GIF输入
+                    gif_input = ffmpeg.input(gif_path.strip())
+                    
+                    # 使用loop filter实现真正的循环播放
+                    gif_looped = gif_input.video.filter('loop', loop=-1, size=32767, start=0)
+                    
+                    # 缩放GIF到与主视频相同的宽度
+                    gif_scaled = gif_looped.filter('scale', video_width, gif_new_height)
+                    
+                    # 计算GIF位置：在结合处居中显示
+                    # 由于位置关系固定：上方视频在上，下方视频在下
+                    # GIF的中心位置应该在结合处（上方视频的高度位置）
+                    # 根据实际的视频来源确定上方视频的高度
+                    if material_path == upper_video_path:
+                        # 素材视频在上方，主视频在下方
+                        upper_height = material_height
+                    else:
+                        # 主视频在上方，素材视频在下方
+                        upper_height = main_height
+                    
+                    gif_center_y = upper_height
+                    
+                    # 叠加缩放后的GIF到视频上，使用shortest=1确保输出时长由主视频决定
+                    video_output = ffmpeg.filter([video_output, gif_scaled], 'overlay', 
+                                               x='(W-w)/2',  # 水平居中
+                                               y=f'{gif_center_y}-h/2',  # 垂直居中在结合处
+                                               shortest=1)  # 输出时长由最短的输入决定（主视频）
+                    print(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由主视频决定")
+                    print(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
+            
+            # 根据音频模式处理音频
+            if audio_mode == "mix":
+                # 混音模式：先检查音频状态
+                print(f"  混音模式 - 素材音量: {material_audio_volume}, 主视频音量: {main_audio_volume}")
                 
-                # 输出合并后的视频
-                (
-                    ffmpeg
-                    .output(
-                        video_output,
-                        audio_output,
-                        output_path,
-                        vcodec='libx264',
-                        acodec='aac',
-                        audio_bitrate='128k',
-                        preset='medium'
-                    )
-                    .overwrite_output()
-                    .run(quiet=False)  # 显示详细错误信息
+                # 检查素材和主视频的音频状态
+                material_info = self.get_video_info(material_path)
+                main_info = self.get_video_info(main_path)
+                
+                if not material_info or not main_info:
+                    print("  无法获取视频信息，使用主视频音频")
+                    audio_output = lower_input.audio
+                elif not material_info['has_audio'] and not main_info['has_audio']:
+                    # 两个视频都没有音频
+                    print("  错误：素材视频和主视频都没有音频，无法进行混音处理")
+                    raise ValueError("素材视频和主视频都没有音频，无法进行混音处理")
+                elif not material_info['has_audio']:
+                    # 只有主视频有音频
+                    print("  素材视频没有音频，使用主视频音频")
+                    audio_output = lower_input.audio
+                elif not main_info['has_audio']:
+                    # 只有素材视频有音频
+                    print("  主视频没有音频，使用素材音频")
+                    audio_output = upper_input.audio
+                else:
+                    # 两个视频都有音频，进行混音
+                    print("  两个视频都有音频，进行混音处理")
+                    # 对素材音频应用音量调整
+                    material_audio_adjusted = upper_input.audio.filter('volume', material_audio_volume)
+                    # 对主视频音频应用音量调整
+                    main_audio_adjusted = lower_input.audio.filter('volume', main_audio_volume)
+                    
+                    # 使用amix filter混合音频
+                    audio_output = ffmpeg.filter([material_audio_adjusted, main_audio_adjusted], 'amix', inputs=2, duration='longest')
+                    print("  混音模式：成功创建混音")
+            else:
+                # 只使用主视频音频
+                print("  使用主视频音频")
+                audio_output = lower_input.audio
+            
+            # 输出合并后的视频
+            (
+                ffmpeg
+                .output(
+                    video_output,
+                    audio_output,
+                    output_path,
+                    vcodec='libx264',
+                    acodec='aac',
+                    audio_bitrate='128k',
+                    preset='medium'
                 )
+                .overwrite_output()
+                .run(quiet=False)  # 显示详细错误信息
+            )
             
             return True
             
@@ -467,104 +350,119 @@ class VideoMergeNode:
             print(f"视频合并失败: {str(e)}")
             return False
     
-    def merge_videos(self, material_folder, game_folder, position, audio_mode, material_audio_volume, game_audio_volume, output_folder_name, material_path="", game_path="", gif_path=""):
+    def merge_videos(self, upper_video_folder: str, lower_video_folder: str, main_video_source: str, audio_mode: str, 
+                     main_audio_volume: float, material_audio_volume: float, output_folder_prefix: str, gif_path: str = ""):
         """
         合并视频文件
         
         Args:
-            material_folder: 素材文件夹（下拉框选择）
-            game_folder: 游戏视频文件夹（下拉框选择）
-            position: 位置关系（up/down）
-            audio_mode: 音频模式（game_only/mix）
-            material_audio_volume: 素材音频音量占比
-            game_audio_volume: 游戏音频音量占比
-            output_folder_name: 输出文件夹名字
-            material_path: 直接输入的素材文件夹路径（可选，优先级高于下拉框）
-            game_path: 直接输入的游戏文件夹路径（可选，优先级高于下拉框）
-            gif_path: GIF动态图路径（可选，如果存在则在结合处叠加显示）
+            upper_video_folder: 上方视频文件夹路径（支持相对路径和绝对路径）
+            lower_video_folder: 下方视频文件夹路径（支持相对路径和绝对路径）
+            main_video_source: 主体视频选择（upper/lower）
+            audio_mode: 音频模式（main_only/mix）
+            main_audio_volume: 主视频音频音量占比
+            material_audio_volume: 素材视频音频音量占比
+            output_folder_prefix: 输出文件夹前缀
+            gif_path: GIF文件夹路径（可选，支持相对路径和绝对路径，GIF文件与主视频依次绑定，不足时循环使用）
         """
         try:
-            # 使用ComfyUI的默认输入和输出路径
-            base_input_dir = folder_paths.get_input_directory()
-            output_folder = folder_paths.get_output_directory()
+            # 解析输入路径（支持相对路径和绝对路径）
+            upper_input_path = resolve_path(upper_video_folder)
+            lower_input_path = resolve_path(lower_video_folder)
             
-            # 构建完整的输入路径（直接输入的路径优先级更高）
-            if material_path and material_path.strip():
-                # 使用直接输入的素材路径
-                material_input_path = material_path.strip()
+            # 验证输入路径是否存在
+            if not os.path.exists(upper_input_path):
+                return ("",)
+            if not os.path.exists(lower_input_path):
+                return ("",)
+            
+            # 根据主体视频选择确定主视频和素材视频路径
+            # 位置关系固定：上方视频文件夹始终在上方，下方视频文件夹始终在下方
+            if main_video_source == "upper":
+                # 上方视频作为主视频，下方视频作为素材视频
+                main_video_path = upper_input_path
+                material_video_path = lower_input_path
             else:
-                # 使用下拉框选择的路径
-                if material_folder == "input":
-                    material_input_path = base_input_dir
-                else:
-                    material_input_path = os.path.join(base_input_dir, material_folder)
+                # 下方视频作为主视频，上方视频作为素材视频
+                main_video_path = lower_input_path
+                material_video_path = upper_input_path
             
-            if game_path and game_path.strip():
-                # 使用直接输入的游戏路径
-                game_input_path = game_path.strip()
-            else:
-                # 使用下拉框选择的路径
-                if game_folder == "input":
-                    game_input_path = base_input_dir
-                else:
-                    game_input_path = os.path.join(base_input_dir, game_folder)
+            # 位置关系固定：上方视频在上，下方视频在下
+            position = "up"  # 上方视频文件夹在上方，下方视频文件夹在下方
             
-            # 验证输入文件夹
-            if not os.path.exists(material_input_path):
-                raise ValueError(f"素材文件夹不存在: {material_input_path}")
-            if not os.path.exists(game_input_path):
-                raise ValueError(f"游戏视频文件夹不存在: {game_input_path}")
-            
-            # 在输出目录下创建指定名字的文件夹
-            output_path = os.path.join(output_folder, output_folder_name)
+            # 创建输出目录
+            output_dir = folder_paths.get_output_directory()
+            unique_folder_name = generate_unique_folder_name(output_folder_prefix, output_dir)
+            output_path = os.path.join(output_dir, unique_folder_name)
             os.makedirs(output_path, exist_ok=True)
             
             # 支持的视频格式
             video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', '*.webm']
             
-            # 获取所有游戏视频文件
-            game_videos = []
+            # 获取所有主视频文件
+            main_videos = []
             for ext in video_extensions:
-                pattern = os.path.join(game_input_path, ext)
-                game_videos.extend(glob.glob(pattern))
+                pattern = os.path.join(main_video_path, ext)
+                main_videos.extend(glob.glob(pattern))
             
             # 获取所有素材视频文件
             material_videos = []
             for ext in video_extensions:
-                pattern = os.path.join(material_input_path, ext)
+                pattern = os.path.join(material_video_path, ext)
                 material_videos.extend(glob.glob(pattern))
             
-            if not game_videos:
-                return (f"未找到游戏视频文件",)
-            if not material_videos:
-                return (f"未找到素材视频文件",)
+            # 获取所有GIF文件
+            gif_files = []
+            if gif_path and gif_path.strip():
+                gif_folder_path = resolve_path(gif_path.strip())
+                if os.path.exists(gif_folder_path):
+                    gif_extensions = ['*.gif', '*.GIF']
+                    for ext in gif_extensions:
+                        pattern = os.path.join(gif_folder_path, ext)
+                        gif_files.extend(glob.glob(pattern))
+                    print(f"找到 {len(gif_files)} 个GIF文件")
+                else:
+                    print(f"GIF文件夹不存在: {gif_folder_path}")
             
-            # 处理每个游戏视频
+            if not main_videos:
+                return ("",)
+            if not material_videos:
+                return ("",)
+            
+            # 处理每个主视频
             processed_count = 0
             material_index = 0
+            gif_index = 0
             output_paths = []
             
-            for game_video in game_videos:
+            for main_video in main_videos:
                 if material_index >= len(material_videos):
                     break  # 素材用完则结束
                 
                 try:
-                    # 获取游戏视频信息
-                    game_info = self.get_video_info(game_video)
-                    if not game_info:
+                    # 获取主视频信息
+                    main_info = self.get_video_info(main_video)
+                    if not main_info:
                         continue
                     
-                    # 检查游戏视频音频情况
-                    game_filename = Path(game_video).stem
-                    if audio_mode == "mix" and not game_info['has_audio']:
-                        print(f"警告: 游戏视频 {game_filename} 没有音频，在mix模式下可能影响混音效果")
+                    # 检查主视频音频情况
+                    main_filename = Path(main_video).stem
+                    if audio_mode == "mix" and not main_info['has_audio']:
+                        print(f"警告: 主视频 {main_filename} 没有音频，在mix模式下可能影响混音效果")
                     
-                    game_duration = game_info['duration']
+                    # 为当前主视频选择GIF文件（循环使用）
+                    current_gif_path = ""
+                    if gif_files:
+                        current_gif_path = gif_files[gif_index % len(gif_files)]
+                        gif_index += 1
+                        print(f"主视频 {main_filename} 使用GIF: {os.path.basename(current_gif_path)}")
+                    
+                    main_duration = main_info['duration']
                     used_materials = []
                     current_duration = 0
                     
-                    # 为当前游戏视频收集足够的素材
-                    while current_duration < game_duration and material_index < len(material_videos):
+                    # 为当前主视频收集足够的素材
+                    while current_duration < main_duration and material_index < len(material_videos):
                         material_video = material_videos[material_index]
                         material_info = self.get_video_info(material_video)
                         
@@ -590,16 +488,16 @@ class VideoMergeNode:
                         continue
                     
                     # 生成输出文件名
-                    game_filename = Path(game_video).stem
+                    game_filename = Path(main_video).stem
                     output_file = os.path.join(output_path, f"{game_filename}_merged.mp4")
                     
                     # 创建临时合并的素材视频
                     temp_dir = tempfile.mkdtemp()
                     temp_material_path = os.path.join(temp_dir, f"temp_material_{game_filename}.mp4")
                     
-                    # 获取游戏视频的宽度
-                    game_info = self.get_video_info(game_video)
-                    game_width = game_info['width']
+                    # 获取主视频的宽度
+                    main_info = self.get_video_info(main_video)
+                    game_width = main_info['width']
                     
                     # 在mix模式下进行最终的音频检查
                     if audio_mode == "mix":
@@ -607,20 +505,20 @@ class VideoMergeNode:
                         materials_with_audio = [m for m in used_materials if m['info']['has_audio']]
                         materials_without_audio = [m for m in used_materials if not m['info']['has_audio']]
                         
-                        if not game_info['has_audio'] and not materials_with_audio:
-                            print(f"错误: 游戏视频 {game_filename} 和所有素材视频都没有音频，无法进行混音处理")
+                        if not main_info['has_audio'] and not materials_with_audio:
+                            print(f"错误: 主视频 {game_filename} 和所有素材视频都没有音频，无法进行混音处理")
                             continue
-                        elif not game_info['has_audio']:
-                            print(f"警告: 游戏视频 {game_filename} 没有音频，将只使用素材音频")
+                        elif not main_info['has_audio']:
+                            print(f"警告: 主视频 {game_filename} 没有音频，将只使用素材音频")
                         elif not materials_with_audio:
                             print(f"警告: 所有素材视频都没有音频，将只使用游戏音频")
                         elif materials_without_audio:
                             print(f"警告: {len(materials_without_audio)} 个素材视频没有音频，可能影响混音效果")
                     
                     # 如果只有一个素材且长度足够，直接使用
-                    if len(used_materials) == 1 and used_materials[0]['duration'] >= game_duration:
+                    if len(used_materials) == 1 and used_materials[0]['duration'] >= main_duration:
                         # 先将素材宽度对齐到游戏宽度，然后截取到游戏长度，兼容音频情况
-                        input_stream = ffmpeg.input(used_materials[0]['path'], t=game_duration)
+                        input_stream = ffmpeg.input(used_materials[0]['path'], t=main_duration)
                         material_info = used_materials[0]['info']
                         
                         if material_info['has_audio']:
@@ -700,18 +598,18 @@ class VideoMergeNode:
                         except:
                             pass
                         
-                        # 检查合并后的素材时长是否足够支持游戏视频时长
+                        # 检查合并后的素材时长是否足够支持主视频时长
                         temp_material_info = self.get_video_info(temp_material_path)
                         if not temp_material_info:
-                            print(f"  警告: 无法获取合并后素材视频信息，跳过游戏视频: {game_filename}")
+                            print(f"  警告: 无法获取合并后素材视频信息，跳过主视频: {game_filename}")
                             continue
                         
                         temp_material_duration = temp_material_info['duration']
-                        if temp_material_duration < game_duration:
-                            print(f"  警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持游戏视频时长 ({game_duration:.2f}秒)，跳过游戏视频: {game_filename}")
+                        if temp_material_duration < main_duration:
+                            print(f"  警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持主视频时长 ({main_duration:.2f}秒)，跳过主视频: {game_filename}")
                             continue
                         
-                        print(f"  合并后素材时长: {temp_material_duration:.2f}秒，游戏视频时长: {game_duration:.2f}秒")
+                        print(f"  合并后素材时长: {temp_material_duration:.2f}秒，主视频时长: {main_duration:.2f}秒")
                         
                         # 截取到游戏长度，兼容音频情况
                         temp_material_cropped = os.path.join(temp_dir, f"temp_material_cropped_{game_filename}.mp4")
@@ -720,7 +618,7 @@ class VideoMergeNode:
                             # 有音频的情况
                             (
                                 ffmpeg
-                                .input(temp_material_path, t=game_duration)
+                                .input(temp_material_path, t=main_duration)
                                 .output(temp_material_cropped, vcodec='libx264', acodec='aac', preset='medium')
                                 .overwrite_output()
                                 .run(quiet=True)
@@ -729,7 +627,7 @@ class VideoMergeNode:
                             # 没有音频的情况
                             (
                                 ffmpeg
-                                .input(temp_material_path, t=game_duration)
+                                .input(temp_material_path, t=main_duration)
                                 .output(temp_material_cropped, vcodec='libx264', preset='medium')
                                 .overwrite_output()
                                 .run(quiet=True)
@@ -739,11 +637,11 @@ class VideoMergeNode:
                         os.remove(temp_material_path)
                         temp_material_path = temp_material_cropped
                     
-                    # 合并素材和游戏视频
-                    if self.merge_videos_vertically(temp_material_path, game_video, output_file, position, audio_mode, material_audio_volume, game_audio_volume, gif_path):
+                    # 合并素材和主视频
+                    if self.merge_videos_vertically(temp_material_path, main_video, output_file, position, audio_mode, material_audio_volume, main_audio_volume, current_gif_path, upper_input_path, lower_input_path):
                         processed_count += 1
                         output_paths.append(output_file)
-                        print(f"成功合并: {game_filename} -> {output_file}")
+                        print(f"成功合并: {main_filename} -> {output_file}")
                     
                     # 清理临时文件和目录
                     try:
@@ -752,21 +650,24 @@ class VideoMergeNode:
                         pass
                     
                 except Exception as e:
-                    print(f"处理游戏视频 {game_video} 时出错: {str(e)}")
+                    print(f"处理主视频 {main_video} 时出错: {str(e)}")
                     continue
             
             if processed_count == 0:
                 return ("",)  # 没有可保存的视频时返回空字符串
             else:
                 # 返回输出文件的目录路径
-                print(f"成功处理 {processed_count} 个游戏视频")
+                print(f"成功处理 {processed_count} 个主视频")
                 print(f"输出目录: {output_path}")
                 print(f"输出文件: {output_paths}")
                 return (output_path,)
                 
+        except ValueError as e:
+            # 输入验证错误
+            return ("",)
         except Exception as e:
-            print(f"处理过程中出错: {str(e)}")
-            return ("",)  # 出错时也返回空字符串
+            # 其他错误
+            return ("",)
 
 # 节点映射
 NODE_CLASS_MAPPINGS = {
@@ -774,5 +675,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "VideoMergeNode": "视频合并"
+    "VideoMergeNode": "视频画幅合并"
 }
