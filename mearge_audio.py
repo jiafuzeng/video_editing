@@ -280,6 +280,8 @@ class AudioMerger:
     
     def _concatenate_audios(self, audio_files: List[str], output_path: str, target_duration: float, volume: float):
         """连接音频文件"""
+
+        
         if len(audio_files) == 1:
             # 单个音频文件，直接复制并调整音量
             audio_input = ffmpeg.input(audio_files[0])
@@ -297,17 +299,20 @@ class AudioMerger:
             )
         else:
             # 多个音频文件，需要连接
+            # 连接所有音频文件（包括重复的）
             inputs = []
             for audio_file in audio_files:
                 audio_input = ffmpeg.input(audio_file)
-                audio_filtered = ffmpeg.filter(audio_input['a'], 'volume', volume)
-                inputs.append(audio_filtered)
+                inputs.append(audio_input['a'])
             
             # 连接音频
             concatenated = ffmpeg.filter(inputs, 'concat', n=len(inputs), v=0, a=1)
             
+            # 统一调整音量
+            audio_with_volume = ffmpeg.filter(concatenated, 'volume', volume)
+            
             # 截取到目标时长
-            final_audio = ffmpeg.filter(concatenated, 'atrim', duration=target_duration)
+            final_audio = ffmpeg.filter(audio_with_volume, 'atrim', duration=target_duration)
             
             (
                 ffmpeg
@@ -315,7 +320,7 @@ class AudioMerger:
                 .overwrite_output()
                 .run()
             )
-
+        return output_path
 
 # ComfyUI节点类
 class AudioMergerNode:
