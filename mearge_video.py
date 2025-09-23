@@ -1,12 +1,16 @@
 import os
 import glob
 import tempfile
+import logging
 from pathlib import Path
 import ffmpeg
 import folder_paths
 import shutil
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
 from .utils import generate_unique_folder_name, resolve_path
+
+# 配置logger
+logger = logging.getLogger(__name__)
 
 class VideoMergeNode(ComfyNodeABC):
     """
@@ -26,8 +30,6 @@ class VideoMergeNode(ComfyNodeABC):
                 "lower_video_folder": (IO.STRING, {"default": "", "tooltip": "下方视频文件夹路径（支持相对路径和绝对路径）"}),
                 "main_video_source": (["upper", "lower"], {"default": "upper", "tooltip": "选择主体视频：upper=上方视频作为主视频, lower=下方视频作为主视频"}),
                 "audio_mode": (["main_only", "mix"], {"default": "main_only", "tooltip": "main_only: 只使用主视频音频, mix: 主视频和素材视频音频混音"}),
-                "main_audio_volume": (IO.FLOAT, {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "主视频音频音量占比 (0.0-2.0)"}),
-                "material_audio_volume": (IO.FLOAT, {"default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1, "tooltip": "素材视频音频音量占比 (0.0-2.0)"}),
                 "output_folder_prefix": (IO.STRING, {"default": "video_merge", "tooltip": "输出文件夹前缀"}),
             },
             "optional": {
@@ -50,22 +52,22 @@ class VideoMergeNode(ComfyNodeABC):
             if not video_stream:
                 return None
             
-            print(f"音频检测 - 文件: {os.path.basename(video_path)}")
-            print(f"  静音阈值: {threshold_db} dB")
+            logger.info(f"音频检测 - 文件: {os.path.basename(video_path)}")
+            logger.info(f"  静音阈值: {threshold_db} dB")
             
             # 第一步：检查是否有音轨
             has_audio_track = audio_stream is not None
-            print(f"  第一步 - 音轨检测: {'有音轨' if has_audio_track else '无音轨'}")
+            logger.info(f"  第一步 - 音轨检测: {'有音轨' if has_audio_track else '无音轨'}")
             
             if audio_stream:
-                print(f"    音频编码: {audio_stream.get('codec_name', '未知')}")
-                print(f"    音频时长: {audio_stream.get('duration', '未知')}")
-                print(f"    采样率: {audio_stream.get('sample_rate', '未知')}")
+                logger.info(f"    音频编码: {audio_stream.get('codec_name', '未知')}")
+                logger.info(f"    音频时长: {audio_stream.get('duration', '未知')}")
+                logger.info(f"    采样率: {audio_stream.get('sample_rate', '未知')}")
             
             # 第二步：如果有音轨，检测音量
             has_audio = False
             if has_audio_track:
-                print(f"  第二步 - 音量检测:")
+                logger.info(f"  第二步 - 音量检测:")
                 try:
                     # 使用ffmpeg-python分析音量
                     input_stream = ffmpeg.input(video_path)
@@ -91,33 +93,33 @@ class VideoMergeNode(ComfyNodeABC):
                                 volume_str = line.split('mean_volume:')[1].strip()
                                 try:
                                     volume_db = float(volume_str.split()[0])
-                                    print(f"    平均音量: {volume_db} dB")
+                                    logger.info(f"    平均音量: {volume_db} dB")
                                     
                                     # 如果音量大于阈值，认为有声音
                                     has_audio = volume_db > threshold_db
-                                    print(f"    音量判断: {'有声音' if has_audio else '静音'} (阈值: {threshold_db} dB)")
+                                    logger.info(f"    音量判断: {'有声音' if has_audio else '静音'} (阈值: {threshold_db} dB)")
                                     break
                                 except Exception as parse_e:
-                                    print(f"    音量解析失败: {parse_e}")
+                                    logger.warning(f"    音量解析失败: {parse_e}")
                                     has_audio = True  # 解析失败时默认认为有声音
-                                    print(f"    音量判断: 有声音（解析失败）")
+                                    logger.info(f"    音量判断: 有声音（解析失败）")
                                     break
                         else:
                             has_audio = True
-                            print(f"    音量判断: 有声音（未找到音量信息）")
+                            logger.info(f"    音量判断: 有声音（未找到音量信息）")
                     else:
                         has_audio = True
-                        print(f"    音量判断: 有声音（无音量信息）")
+                        logger.info(f"    音量判断: 有声音（无音量信息）")
                         
                 except Exception as volume_e:
-                    print(f"    音量检测异常: {volume_e}")
+                    logger.warning(f"    音量检测异常: {volume_e}")
                     has_audio = True  # 检测失败时默认认为有声音
-                    print(f"    音量判断: 有声音（检测失败）")
+                    logger.info(f"    音量判断: 有声音（检测失败）")
             else:
-                print(f"  第二步 - 跳过音量检测（无音轨）")
+                logger.info(f"  第二步 - 跳过音量检测（无音轨）")
                 has_audio = False
             
-            print(f"  最终判断: {'有音频' if has_audio else '无音频'}")
+            logger.info(f"  最终判断: {'有音频' if has_audio else '无音频'}")
             
             return {
                 'width': int(video_stream['width']),
@@ -127,7 +129,7 @@ class VideoMergeNode(ComfyNodeABC):
                 'has_audio': has_audio
             }
         except Exception as e:
-            print(f"获取视频信息失败 {video_path}: {str(e)}")
+            logger.error(f"获取视频信息失败 {video_path}: {str(e)}")
             return None
     
     def resize_video_to_width(self, input_path, target_width, output_path):
@@ -150,14 +152,14 @@ class VideoMergeNode(ComfyNodeABC):
             # 使用ffmpeg进行缩放，兼容有声音和没有声音的情况
             input_stream = ffmpeg.input(input_path)
             
-            print(f"缩放视频: {os.path.basename(input_path)} -> {os.path.basename(output_path)}")
-            print(f"  原始尺寸: {original_width}x{original_height}")
-            print(f"  目标尺寸: {target_width}x{new_height}")
-            print(f"  有音频: {video_info['has_audio']}")
+            logger.info(f"缩放视频: {os.path.basename(input_path)} -> {os.path.basename(output_path)}")
+            logger.info(f"  原始尺寸: {original_width}x{original_height}")
+            logger.info(f"  目标尺寸: {target_width}x{new_height}")
+            logger.info(f"  有音频: {video_info['has_audio']}")
             
             if video_info['has_audio']:
                 # 有音频的情况
-                print("  使用音频输出模式")
+                logger.info("  使用音频输出模式")
                 (
                     ffmpeg
                     .output(
@@ -173,7 +175,7 @@ class VideoMergeNode(ComfyNodeABC):
                 )
             else:
                 # 没有音频的情况
-                print("  使用无音频输出模式")
+                logger.info("  使用无音频输出模式")
                 (
                     ffmpeg
                     .output(
@@ -188,47 +190,47 @@ class VideoMergeNode(ComfyNodeABC):
             
             return True
         except Exception as e:
-            print(f"视频缩放失败 {input_path}: {str(e)}")
+            logger.error(f"视频缩放失败 {input_path}: {str(e)}")
             return False
     
-    def merge_videos_vertically(self, material_path, main_path, output_path, position="up", audio_mode="main_only", material_audio_volume=0.5, main_audio_volume=0.5, gif_path="", upper_video_path="", lower_video_path=""):
+    def merge_videos_vertically(self, material_path, main_path, output_path, position="up", audio_mode="main_only", material_audio_volume=1.0, main_audio_volume=1.0, gif_path="", is_main_from_upper=True):
         """垂直合并视频"""
         try:
             # 获取视频信息用于调试
             material_info = self.get_video_info(material_path)
             main_info = self.get_video_info(main_path)
             
-            print(f"垂直合并视频:")
-            print(f"  素材: {os.path.basename(material_path)} (有音频: {material_info['has_audio'] if material_info else '未知'})")
-            print(f"  主视频: {os.path.basename(main_path)} (有音频: {main_info['has_audio'] if main_info else '未知'})")
-            print(f"  位置: {position}, 音频模式: {audio_mode}")
+            logger.info(f"垂直合并视频:")
+            logger.info(f"  素材: {os.path.basename(material_path)} (有音频: {material_info['has_audio'] if material_info else '未知'})")
+            logger.info(f"  主视频: {os.path.basename(main_path)} (有音频: {main_info['has_audio'] if main_info else '未知'})")
+            logger.info(f"  位置: {position}, 音频模式: {audio_mode}")
             
-            # 根据实际视频来源确定位置关系
+            # 根据主视频来源确定位置关系
             # 上方视频文件夹的视频始终在上方，下方视频文件夹的视频始终在下方
-            if material_path == upper_video_path:
-                # 素材视频来自上方文件夹，主视频来自下方文件夹
-                # 上方视频在上，下方视频在下
-                upper_input = ffmpeg.input(material_path)  # 上方视频
-                lower_input = ffmpeg.input(main_path)      # 下方视频
-                print(f"  位置关系: 上方视频({os.path.basename(material_path)}) 在上，下方视频({os.path.basename(main_path)}) 在下")
-            else:
+            if is_main_from_upper:
                 # 主视频来自上方文件夹，素材视频来自下方文件夹
                 # 上方视频在上，下方视频在下
-                upper_input = ffmpeg.input(main_path)      # 上方视频
-                lower_input = ffmpeg.input(material_path)  # 下方视频
-                print(f"  位置关系: 上方视频({os.path.basename(main_path)}) 在上，下方视频({os.path.basename(material_path)}) 在下")
+                upper_input = ffmpeg.input(main_path)      # 上方视频（主视频）
+                lower_input = ffmpeg.input(material_path)  # 下方视频（素材）
+                logger.info(f"  位置关系: 上方视频({os.path.basename(main_path)}) 在上，下方视频({os.path.basename(material_path)}) 在下")
+            else:
+                # 素材视频来自上方文件夹，主视频来自下方文件夹
+                # 上方视频在上，下方视频在下
+                upper_input = ffmpeg.input(material_path)  # 上方视频（素材）
+                lower_input = ffmpeg.input(main_path)      # 下方视频（主视频）
+                logger.info(f"  位置关系: 上方视频({os.path.basename(material_path)}) 在上，下方视频({os.path.basename(main_path)}) 在下")
             
             # 使用vstack filter合并视频（上方视频在上，下方视频在下）
             video_output = ffmpeg.filter([upper_input.video, lower_input.video], 'vstack', inputs=2)
             
             # 检查是否需要叠加GIF
             if gif_path and gif_path.strip() and os.path.exists(gif_path.strip()):
-                print(f"  检测到GIF文件: {os.path.basename(gif_path)}")
+                logger.info(f"  检测到GIF文件: {os.path.basename(gif_path)}")
                 
                 # 获取GIF信息
                 gif_info = self.get_video_info(gif_path.strip())
                 if not gif_info:
-                    print(f"  警告: 无法获取GIF信息，跳过GIF叠加")
+                    logger.warning(f"  警告: 无法获取GIF信息，跳过GIF叠加")
                 else:
                     # 获取合并后视频的尺寸和时长
                     material_height = material_info['height']
@@ -241,10 +243,10 @@ class VideoMergeNode(ComfyNodeABC):
                     main_duration = main_info['duration']
                     total_duration = main_duration  # 使用主视频时长作为目标时长
                     
-                    print(f"  主视频时长: {main_duration:.2f}秒")
-                    print(f"  素材视频时长: {material_duration:.2f}秒")
-                    print(f"  目标合并时长: {total_duration:.2f}秒")
-                    print(f"  GIF原始时长: {gif_info['duration']:.2f}秒")
+                    logger.info(f"  主视频时长: {main_duration:.2f}秒")
+                    logger.info(f"  素材视频时长: {material_duration:.2f}秒")
+                    logger.info(f"  目标合并时长: {total_duration:.2f}秒")
+                    logger.info(f"  GIF原始时长: {gif_info['duration']:.2f}秒")
                     
                     # 计算GIF缩放后的高度（等比缩放）
                     gif_original_width = gif_info['width']
@@ -255,8 +257,8 @@ class VideoMergeNode(ComfyNodeABC):
                     if gif_new_height % 2 != 0:
                         gif_new_height += 1
                     
-                    print(f"  GIF原始尺寸: {gif_original_width}x{gif_original_height}")
-                    print(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
+                    logger.info(f"  GIF原始尺寸: {gif_original_width}x{gif_original_height}")
+                    logger.info(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
                     
                     # 创建GIF输入
                     gif_input = ffmpeg.input(gif_path.strip())
@@ -271,12 +273,12 @@ class VideoMergeNode(ComfyNodeABC):
                     # 由于位置关系固定：上方视频在上，下方视频在下
                     # GIF的中心位置应该在结合处（上方视频的高度位置）
                     # 根据实际的视频来源确定上方视频的高度
-                    if material_path == upper_video_path:
-                        # 素材视频在上方，主视频在下方
-                        upper_height = material_height
-                    else:
+                    if is_main_from_upper:
                         # 主视频在上方，素材视频在下方
                         upper_height = main_height
+                    else:
+                        # 素材视频在上方，主视频在下方
+                        upper_height = material_height
                     
                     gif_center_y = upper_height
                     
@@ -285,36 +287,36 @@ class VideoMergeNode(ComfyNodeABC):
                                                x='(W-w)/2',  # 水平居中
                                                y=f'{gif_center_y}-h/2',  # 垂直居中在结合处
                                                shortest=1)  # 输出时长由最短的输入决定（主视频）
-                    print(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由主视频决定")
-                    print(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
+                    logger.info(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由主视频决定")
+                    logger.info(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
             
             # 根据音频模式处理音频
             if audio_mode == "mix":
                 # 混音模式：先检查音频状态
-                print(f"  混音模式 - 素材音量: {material_audio_volume}, 主视频音量: {main_audio_volume}")
+                logger.info(f"  混音模式 - 素材音量: {material_audio_volume}, 主视频音量: {main_audio_volume}")
                 
                 # 检查素材和主视频的音频状态
                 material_info = self.get_video_info(material_path)
                 main_info = self.get_video_info(main_path)
                 
                 if not material_info or not main_info:
-                    print("  无法获取视频信息，使用主视频音频")
+                    logger.warning("  无法获取视频信息，使用主视频音频")
                     audio_output = lower_input.audio
                 elif not material_info['has_audio'] and not main_info['has_audio']:
                     # 两个视频都没有音频
-                    print("  错误：素材视频和主视频都没有音频，无法进行混音处理")
+                    logger.error("  错误：素材视频和主视频都没有音频，无法进行混音处理")
                     raise ValueError("素材视频和主视频都没有音频，无法进行混音处理")
                 elif not material_info['has_audio']:
                     # 只有主视频有音频
-                    print("  素材视频没有音频，使用主视频音频")
+                    logger.info("  素材视频没有音频，使用主视频音频")
                     audio_output = lower_input.audio
                 elif not main_info['has_audio']:
                     # 只有素材视频有音频
-                    print("  主视频没有音频，使用素材音频")
+                    logger.info("  主视频没有音频，使用素材音频")
                     audio_output = upper_input.audio
                 else:
                     # 两个视频都有音频，进行混音
-                    print("  两个视频都有音频，进行混音处理")
+                    logger.info("  两个视频都有音频，进行混音处理")
                     # 对素材音频应用音量调整
                     material_audio_adjusted = upper_input.audio.filter('volume', material_audio_volume)
                     # 对主视频音频应用音量调整
@@ -322,10 +324,10 @@ class VideoMergeNode(ComfyNodeABC):
                     
                     # 使用amix filter混合音频
                     audio_output = ffmpeg.filter([material_audio_adjusted, main_audio_adjusted], 'amix', inputs=2, duration='longest')
-                    print("  混音模式：成功创建混音")
+                    logger.info("  混音模式：成功创建混音")
             else:
                 # 只使用主视频音频
-                print("  使用主视频音频")
+                logger.info("  使用主视频音频")
                 audio_output = lower_input.audio
             
             # 输出合并后的视频
@@ -347,11 +349,11 @@ class VideoMergeNode(ComfyNodeABC):
             return True
             
         except Exception as e:
-            print(f"视频合并失败: {str(e)}")
+            logger.error(f"视频合并失败: {str(e)}")
             return False
     
     def merge_videos(self, upper_video_folder: str, lower_video_folder: str, main_video_source: str, audio_mode: str, 
-                     main_audio_volume: float, material_audio_volume: float, output_folder_prefix: str, gif_path: str = ""):
+                     output_folder_prefix: str, gif_path: str = ""):
         """
         合并视频文件
         
@@ -360,12 +362,14 @@ class VideoMergeNode(ComfyNodeABC):
             lower_video_folder: 下方视频文件夹路径（支持相对路径和绝对路径）
             main_video_source: 主体视频选择（upper/lower）
             audio_mode: 音频模式（main_only/mix）
-            main_audio_volume: 主视频音频音量占比
-            material_audio_volume: 素材视频音频音量占比
             output_folder_prefix: 输出文件夹前缀
             gif_path: GIF文件夹路径（可选，支持相对路径和绝对路径，GIF文件与主视频依次绑定，不足时循环使用）
         """
         try:
+            # 设置默认音量参数
+            main_audio_volume = 1.0
+            material_audio_volume = 1.0
+            
             # 解析输入路径（支持相对路径和绝对路径）
             upper_input_path = resolve_path(upper_video_folder)
             lower_input_path = resolve_path(lower_video_folder)
@@ -420,9 +424,9 @@ class VideoMergeNode(ComfyNodeABC):
                     for ext in gif_extensions:
                         pattern = os.path.join(gif_folder_path, ext)
                         gif_files.extend(glob.glob(pattern))
-                    print(f"找到 {len(gif_files)} 个GIF文件")
+                    logger.info(f"找到 {len(gif_files)} 个GIF文件")
                 else:
-                    print(f"GIF文件夹不存在: {gif_folder_path}")
+                    logger.warning(f"GIF文件夹不存在: {gif_folder_path}")
             
             if not main_videos:
                 return ("",)
@@ -448,14 +452,14 @@ class VideoMergeNode(ComfyNodeABC):
                     # 检查主视频音频情况
                     main_filename = Path(main_video).stem
                     if audio_mode == "mix" and not main_info['has_audio']:
-                        print(f"警告: 主视频 {main_filename} 没有音频，在mix模式下可能影响混音效果")
+                        logger.warning(f"警告: 主视频 {main_filename} 没有音频，在mix模式下可能影响混音效果")
                     
                     # 为当前主视频选择GIF文件（循环使用）
                     current_gif_path = ""
                     if gif_files:
                         current_gif_path = gif_files[gif_index % len(gif_files)]
                         gif_index += 1
-                        print(f"主视频 {main_filename} 使用GIF: {os.path.basename(current_gif_path)}")
+                        logger.info(f"主视频 {main_filename} 使用GIF: {os.path.basename(current_gif_path)}")
                     
                     main_duration = main_info['duration']
                     used_materials = []
@@ -473,7 +477,7 @@ class VideoMergeNode(ComfyNodeABC):
                         # 检查素材视频音频情况
                         material_filename = Path(material_video).stem
                         if audio_mode == "mix" and not material_info['has_audio']:
-                            print(f"警告: 素材视频 {material_filename} 没有音频，在mix模式下可能影响混音效果")
+                            logger.warning(f"警告: 素材视频 {material_filename} 没有音频，在mix模式下可能影响混音效果")
                         
                         used_materials.append({
                             'path': material_video,
@@ -488,16 +492,16 @@ class VideoMergeNode(ComfyNodeABC):
                         continue
                     
                     # 生成输出文件名
-                    game_filename = Path(main_video).stem
-                    output_file = os.path.join(output_path, f"{game_filename}_merged.mp4")
+                    main_filename = Path(main_video).stem
+                    output_file = os.path.join(output_path, f"{main_filename}_merged.mp4")
                     
                     # 创建临时合并的素材视频
                     temp_dir = tempfile.mkdtemp()
-                    temp_material_path = os.path.join(temp_dir, f"temp_material_{game_filename}.mp4")
+                    temp_material_path = os.path.join(temp_dir, f"temp_material_{main_filename}.mp4")
                     
                     # 获取主视频的宽度
                     main_info = self.get_video_info(main_video)
-                    game_width = main_info['width']
+                    main_width = main_info['width']
                     
                     # 在mix模式下进行最终的音频检查
                     if audio_mode == "mix":
@@ -506,18 +510,18 @@ class VideoMergeNode(ComfyNodeABC):
                         materials_without_audio = [m for m in used_materials if not m['info']['has_audio']]
                         
                         if not main_info['has_audio'] and not materials_with_audio:
-                            print(f"错误: 主视频 {game_filename} 和所有素材视频都没有音频，无法进行混音处理")
+                            logger.error(f"错误: 主视频 {main_filename} 和所有素材视频都没有音频，无法进行混音处理")
                             continue
                         elif not main_info['has_audio']:
-                            print(f"警告: 主视频 {game_filename} 没有音频，将只使用素材音频")
+                            logger.warning(f"警告: 主视频 {main_filename} 没有音频，将只使用素材音频")
                         elif not materials_with_audio:
-                            print(f"警告: 所有素材视频都没有音频，将只使用游戏音频")
+                            logger.warning(f"警告: 所有素材视频都没有音频，将只使用主视频音频")
                         elif materials_without_audio:
-                            print(f"警告: {len(materials_without_audio)} 个素材视频没有音频，可能影响混音效果")
+                            logger.warning(f"警告: {len(materials_without_audio)} 个素材视频没有音频，可能影响混音效果")
                     
                     # 如果只有一个素材且长度足够，直接使用
                     if len(used_materials) == 1 and used_materials[0]['duration'] >= main_duration:
-                        # 先将素材宽度对齐到游戏宽度，然后截取到游戏长度，兼容音频情况
+                        # 先将素材宽度对齐到主视频宽度，然后截取到主视频长度，兼容音频情况
                         input_stream = ffmpeg.input(used_materials[0]['path'], t=main_duration)
                         material_info = used_materials[0]['info']
                         
@@ -526,7 +530,7 @@ class VideoMergeNode(ComfyNodeABC):
                             (
                                 ffmpeg
                                 .output(
-                                    input_stream.video.filter('scale', game_width, -1),  # 宽度对齐，高度自动计算
+                                    input_stream.video.filter('scale', main_width, -1),  # 宽度对齐，高度自动计算
                                     input_stream.audio,  # 保留音频
                                     temp_material_path, 
                                     vcodec='libx264', 
@@ -541,7 +545,7 @@ class VideoMergeNode(ComfyNodeABC):
                             (
                                 ffmpeg
                                 .output(
-                                    input_stream.video.filter('scale', game_width, -1),  # 宽度对齐，高度自动计算
+                                    input_stream.video.filter('scale', main_width, -1),  # 宽度对齐，高度自动计算
                                     temp_material_path, 
                                     vcodec='libx264', 
                                     preset='medium'
@@ -551,18 +555,18 @@ class VideoMergeNode(ComfyNodeABC):
                             )
                     else:
                         # 多个素材需要拼接
-                        # 先将每个素材宽度对齐到游戏宽度
+                        # 先将每个素材宽度对齐到主视频宽度
                         resized_materials = []
                         for i, material in enumerate(used_materials):
                             resized_path = os.path.join(temp_dir, f"resized_material_{i}.mp4")
-                            if self.resize_video_to_width(material['path'], game_width, resized_path):
+                            if self.resize_video_to_width(material['path'], main_width, resized_path):
                                 resized_materials.append(resized_path)
                         
                         if not resized_materials:
                             continue
                         
                         # 创建concat文件列表
-                        concat_file = os.path.join(temp_dir, f"concat_list_{game_filename}.txt")
+                        concat_file = os.path.join(temp_dir, f"concat_list_{main_filename}.txt")
                         with open(concat_file, 'w') as f:
                             for resized_material in resized_materials:
                                 f.write(f"file '{resized_material}'\n")
@@ -601,18 +605,18 @@ class VideoMergeNode(ComfyNodeABC):
                         # 检查合并后的素材时长是否足够支持主视频时长
                         temp_material_info = self.get_video_info(temp_material_path)
                         if not temp_material_info:
-                            print(f"  警告: 无法获取合并后素材视频信息，跳过主视频: {game_filename}")
+                            logger.warning(f"  警告: 无法获取合并后素材视频信息，跳过主视频: {main_filename}")
                             continue
                         
                         temp_material_duration = temp_material_info['duration']
                         if temp_material_duration < main_duration:
-                            print(f"  警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持主视频时长 ({main_duration:.2f}秒)，跳过主视频: {game_filename}")
+                            logger.warning(f"  警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持主视频时长 ({main_duration:.2f}秒)，跳过主视频: {main_filename}")
                             continue
                         
-                        print(f"  合并后素材时长: {temp_material_duration:.2f}秒，主视频时长: {main_duration:.2f}秒")
+                        logger.info(f"  合并后素材时长: {temp_material_duration:.2f}秒，主视频时长: {main_duration:.2f}秒")
                         
-                        # 截取到游戏长度，兼容音频情况
-                        temp_material_cropped = os.path.join(temp_dir, f"temp_material_cropped_{game_filename}.mp4")
+                        # 截取到主视频长度，兼容音频情况
+                        temp_material_cropped = os.path.join(temp_dir, f"temp_material_cropped_{main_filename}.mp4")
                         
                         if temp_material_info and temp_material_info['has_audio']:
                             # 有音频的情况
@@ -638,10 +642,12 @@ class VideoMergeNode(ComfyNodeABC):
                         temp_material_path = temp_material_cropped
                     
                     # 合并素材和主视频
-                    if self.merge_videos_vertically(temp_material_path, main_video, output_file, position, audio_mode, material_audio_volume, main_audio_volume, current_gif_path, upper_input_path, lower_input_path):
+                    # 根据main_video_source确定主视频是否来自上方
+                    is_main_from_upper = (main_video_source == "upper")
+                    if self.merge_videos_vertically(temp_material_path, main_video, output_file, position, audio_mode, material_audio_volume, main_audio_volume, current_gif_path, is_main_from_upper):
                         processed_count += 1
                         output_paths.append(output_file)
-                        print(f"成功合并: {main_filename} -> {output_file}")
+                        logger.info(f"成功合并: {main_filename} -> {output_file}")
                     
                     # 清理临时文件和目录
                     try:
@@ -650,16 +656,16 @@ class VideoMergeNode(ComfyNodeABC):
                         pass
                     
                 except Exception as e:
-                    print(f"处理主视频 {main_video} 时出错: {str(e)}")
+                    logger.error(f"处理主视频 {main_video} 时出错: {str(e)}")
                     continue
             
             if processed_count == 0:
                 return ("",)  # 没有可保存的视频时返回空字符串
             else:
                 # 返回输出文件的目录路径
-                print(f"成功处理 {processed_count} 个主视频")
-                print(f"输出目录: {output_path}")
-                print(f"输出文件: {output_paths}")
+                logger.info(f"成功处理 {processed_count} 个主视频")
+                logger.info(f"输出目录: {output_path}")
+                logger.info(f"输出文件: {output_paths}")
                 return (output_path,)
                 
         except ValueError as e:
