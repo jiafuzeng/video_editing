@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import folder_paths
 from pathlib import Path
+import tempfile
+import shutil
 
 # 支持的视频格式
 SUPPORTED_VIDEO_FORMATS = ["*.mp4", "*.avi", "*.mov", "*.mkv", "*.wmv", "*.flv", "*.webm", "*.m4v"]
@@ -26,6 +28,164 @@ def get_video_files(directory):
 def phash_frame(frame):
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     return imagehash.phash(pil_img)
+
+def normalize_video_resolution(recording_file, clip_dir, target_resolution=None):
+    """
+    统一录播视频和片段文件夹中所有视频的分辨率
+    
+    参数:
+        recording_file: 录播视频文件路径
+        clip_dir: 片段文件夹路径
+        target_resolution: 目标分辨率，如果为None则自动使用录播视频的分辨率
+    
+    返回:
+        tuple: (统一后的录播视频路径, 统一后的片段文件夹路径, 临时文件夹路径)
+    """
+    # 创建临时文件夹
+    temp_dir = tempfile.mkdtemp(prefix="video_normalize_")
+    temp_clip_dir = os.path.join(temp_dir, "clips")
+    os.makedirs(temp_clip_dir, exist_ok=True)
+    
+    print(f"创建临时文件夹: {temp_dir}")
+    
+    try:
+        # 0. 自动检测录播视频分辨率（如果未指定目标分辨率）
+        if target_resolution is None:
+            recording_resolution = get_video_resolution(recording_file)
+            if recording_resolution:
+                target_resolution = recording_resolution
+                print(f"自动检测到录播视频分辨率: {target_resolution[0]}x{target_resolution[1]}")
+            else:
+                target_resolution = (1920, 1080)
+                print(f"无法检测录播视频分辨率，使用默认分辨率: {target_resolution[0]}x{target_resolution[1]}")
+        else:
+            print(f"使用指定分辨率: {target_resolution[0]}x{target_resolution[1]}")
+        
+        # 1. 处理录播视频
+        print(f"正在统一录播视频分辨率: {recording_file}")
+        recording_basename = os.path.basename(recording_file)
+        temp_recording_file = os.path.join(temp_dir, recording_basename)
+        
+        # 检查录播视频是否需要转换分辨率
+        recording_resolution = get_video_resolution(recording_file)
+        if recording_resolution and recording_resolution == target_resolution:
+            print("录播视频分辨率已匹配，创建软连接")
+            os.symlink(recording_file, temp_recording_file)
+        else:
+            # 使用ffmpeg统一录播视频分辨率
+            (
+                ffmpeg
+                .input(recording_file)
+                .filter('scale', target_resolution[0], target_resolution[1])
+                .output(temp_recording_file, vcodec='libx264', acodec='copy')
+                .overwrite_output()
+                .run(quiet=True)
+            )
+        print(f"录播视频分辨率已统一: {temp_recording_file}")
+        
+        # 2. 处理片段文件夹中的所有视频
+        print(f"正在统一片段文件夹中视频的分辨率: {clip_dir}")
+        processed_clips = []
+        
+        for clip_file in os.listdir(clip_dir):
+            if clip_file.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v')):
+                clip_file_path = os.path.join(clip_dir, clip_file)
+                temp_clip_file = os.path.join(temp_clip_dir, clip_file)
+                
+                try:
+                    # 检查片段视频是否需要转换分辨率
+                    clip_resolution = get_video_resolution(clip_file_path)
+                    if clip_resolution and clip_resolution == target_resolution:
+                        print(f"片段视频 {clip_file} 分辨率已匹配，创建软连接")
+                        os.symlink(clip_file_path, temp_clip_file)
+                    else:
+                        # 使用ffmpeg统一片段视频分辨率
+                        (
+                            ffmpeg
+                            .input(clip_file_path)
+                            .filter('scale', target_resolution[0], target_resolution[1])
+                            .output(temp_clip_file, vcodec='libx264', acodec='copy')
+                            .overwrite_output()
+                            .run(quiet=True)
+                        )
+                        print(f"片段视频分辨率已统一: {clip_file}")
+                    
+                    processed_clips.append(temp_clip_file)
+                except Exception as e:
+                    print(f"处理片段视频 {clip_file} 时出错: {str(e)}")
+                    # 如果处理失败，创建软连接
+                    try:
+                        os.symlink(clip_file_path, temp_clip_file)
+                    except:
+                        # 如果软连接创建失败，则复制原文件
+                        shutil.copy2(clip_file_path, temp_clip_file)
+                    processed_clips.append(temp_clip_file)
+        
+        print(f"分辨率统一完成，共处理 {len(processed_clips)} 个片段视频")
+        return temp_recording_file, temp_clip_dir, temp_dir
+        
+    except Exception as e:
+        print(f"统一视频分辨率时发生错误: {str(e)}")
+        # 清理临时文件夹
+        cleanup_temp_folder(temp_dir)
+        raise e
+
+def cleanup_temp_folder(temp_dir):
+    """
+    清理临时文件夹
+    
+    参数:
+        temp_dir: 临时文件夹路径
+    """
+    try:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            print(f"临时文件夹已清理: {temp_dir}")
+    except Exception as e:
+        print(f"清理临时文件夹时出错: {str(e)}")
+
+def get_video_resolution(video_file):
+    """
+    获取视频文件的分辨率
+    
+    参数:
+        video_file: 视频文件路径
+    
+    返回:
+        tuple: (宽度, 高度)
+    """
+    try:
+        probe = ffmpeg.probe(video_file)
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        if video_stream:
+            width = int(video_stream['width'])
+            height = int(video_stream['height'])
+            return (width, height)
+        else:
+            return None
+    except Exception as e:
+        print(f"获取视频分辨率时出错: {str(e)}")
+        return None
+
+# 使用示例：
+"""
+# 示例1：自动检测录播视频分辨率并统一所有视频
+temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
+    recording_file="path/to/recording.mp4",
+    clip_dir="path/to/clips/",
+    target_resolution=None  # 自动使用录播视频的分辨率
+)
+
+# 示例2：手动指定目标分辨率
+temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
+    recording_file="path/to/recording.mp4",
+    clip_dir="path/to/clips/",
+    target_resolution=(1920, 1080)  # 手动指定分辨率
+)
+
+# 使用完毕后记得清理临时文件夹
+cleanup_temp_folder(temp_dir)
+"""
 
 
 def phash_frame_hd(frame):
@@ -158,22 +318,6 @@ def _invert_segments(segments, duration):
         keep.append((prev, duration))
     return [(round(s, 3), round(e, 3)) for s, e in keep if e - s > 1e-3]
 
-
-def _merge_time_segments(segments, gap=1e-3):
-    """合并时间上重叠或相邻（间隔<=gap）的区间。"""
-    if not segments:
-        return []
-    segments = sorted(segments, key=lambda x: x[0])
-    merged = [list(segments[0])]
-    for s, e in segments[1:]:
-        last_s, last_e = merged[-1]
-        if s <= last_e + gap:
-            merged[-1][1] = max(last_e, e)
-        else:
-            merged.append([s, e])
-    return [(round(s, 3), round(e, 3)) for s, e in merged]
-
-
 def export_video_without_segments(video_path, segments, output_path):
     """使用 ffmpeg 将给定静止区间删除并导出新视频。
     segments: [(start_sec, end_sec), ...] 按时间升序且不重叠
@@ -252,7 +396,7 @@ def match_video(query_hashes, target_hashes, threshold=5):
     matches.sort(key=lambda x: x[1])
     return matches
 
-def match_video_single(query_hashes, target_hashes, threshold=5):
+def match_video_single(query_hashes, target_hashes):
     """找到最佳匹配位置（原函数）"""
     qlen = len(query_hashes)
     best_score, best_pos = float('inf'), -1
@@ -622,17 +766,24 @@ class VideoHashCutNode(ComfyNodeABC):
         merge_gap_seconds = task_params['merge_gap_seconds'] # 合并片段的最大间隔
         output_dir = task_params['output_dir']              # 输出文件夹路径
         
+        temp_dir = None
         try:
+            # 步骤0：统一视频分辨率
+            print("开始统一视频分辨率...")
+            temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
+                recording_file, clip_dir, target_resolution=None  # 自动检测录播视频分辨率
+            )
+            
             # 步骤1：计算录播视频的感知哈希和时间戳
-            target_hashes, ts_target = video_to_phash(recording_file)
+            target_hashes, ts_target = video_to_phash(temp_recording_file)
             
             # 初始化所有片段的时间片段列表
             all_segments = []
-            
+
             # 步骤2：遍历片段文件夹中的所有视频文件
-            for clip_file in os.listdir(clip_dir):
+            for clip_file in os.listdir(temp_clip_dir):
                 # 构建片段视频的完整路径
-                clip_file_path = os.path.join(clip_dir, clip_file)
+                clip_file_path = os.path.join(temp_clip_dir, clip_file)
                 
                 # 步骤3：计算片段视频的感知哈希
                 clip_file_hashes, _ = video_to_phash(clip_file_path)
@@ -654,6 +805,11 @@ class VideoHashCutNode(ComfyNodeABC):
             results = merge_segments(all_segments, merge_gap_seconds)
             segments_for_export = [(s["start"], s["end"]) for s in results if isinstance(s, dict) and "start" in s and "end" in s]
             success = export_video_without_segments(recording_file, segments_for_export, output_dir)
+            
+            # 清理临时文件夹
+            if temp_dir:
+                cleanup_temp_folder(temp_dir)
+            
             if success:
                 return {
                     'game_name': os.path.basename(recording_file),
@@ -669,6 +825,9 @@ class VideoHashCutNode(ComfyNodeABC):
             
         except Exception as e:
             print(f"处理视频时发生错误: {str(e)}")
+            # 确保在异常情况下也清理临时文件夹
+            if temp_dir:
+                cleanup_temp_folder(temp_dir)
             return None
 
 
