@@ -1070,58 +1070,6 @@ app.registerExtension({
             // 右键“视频编辑”面板
             addVideoEditMenu(nodeType);
 
-            // 上传按钮（选择本地视频并回填）
-            addUploadWidget(nodeType, nodeData, "video_path", "video");
-
-            // 绑定路径选择回调，联动预览（路径可来自对话框/手动输入/上传回填）
-            chainCallback(nodeType.prototype, "onNodeCreated", function() {
-                const pathWidget = this.widgets?.find?.((w) => w.name === "video_path");
-                if (!pathWidget) return;
-                // 过滤扩展名（用于 VHS 风格路径选择器兼容）
-                pathWidget.options = pathWidget.options || {};
-                pathWidget.options.vhs_path_extensions = ["mp4","mov","mkv","webm","avi","wmv","flv","m4v","gif"];
-                chainCallback(pathWidget, "callback", (value) => {
-                    if (!value) return;
-                    const dot = value.lastIndexOf(".");
-                    const ext = dot >= 0 ? value.slice(dot+1).toLowerCase() : "mp4";
-                    let format = ["gif","webp","avif"].includes(ext) ? "image" : "video";
-                    format += "/" + ext;
-                    // 推断 /view 标准参数：type(input/output/temp) + subfolder + filename
-                    const inferParams = (fullPath) => {
-                        let p = fullPath.replace(/\\/g, '/');
-                        const parts = p.split('/').filter(Boolean);
-                        const idxInput = parts.lastIndexOf('input');
-                        const idxOutput = parts.lastIndexOf('output');
-                        const idxTemp = parts.lastIndexOf('temp');
-                        let type = 'input';
-                        let subfolder = '';
-                        let filename = parts.length ? parts[parts.length - 1] : fullPath;
-                        if (idxInput >= 0) {
-                            type = 'input';
-                            subfolder = parts.slice(idxInput + 1, parts.length - 1).join('/');
-                        } else if (idxOutput >= 0) {
-                            type = 'output';
-                            subfolder = parts.slice(idxOutput + 1, parts.length - 1).join('/');
-                        } else if (idxTemp >= 0) {
-                            type = 'temp';
-                            subfolder = parts.slice(idxTemp + 1, parts.length - 1).join('/');
-                        } else {
-                            // 无法匹配受控根目录，尽量按相对路径处理
-                            const i = p.lastIndexOf('/');
-                            if (i > 0) {
-                                subfolder = p.slice(0, i);
-                                filename = p.slice(i + 1);
-                            }
-                        }
-                        const out = { filename, type };
-                        if (subfolder) out.subfolder = subfolder;
-                        return out;
-                    }
-                    const base = inferParams(value);
-                    const params = { ...base, format };
-                    this.updateParameters(params, true);
-                });
-            });
         }
     },
     

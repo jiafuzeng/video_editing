@@ -145,11 +145,14 @@ class VideoPreviewNode(ComfyNodeABC):
     
     @classmethod
     def INPUT_TYPES(cls) -> InputTypeDict:
-        # 采用 VHS 的 Path 风格：文本输入 + 扩展名过滤，可直接选择任意路径
-        video_extensions = ['webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'wmv', 'flv', 'm4v']
+        # 采用内置上传：列出 input 目录下的视频，并启用 video_upload
+        input_dir = folder_paths.get_input_directory()
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        files = folder_paths.filter_files_content_types(files, ["video"]) or []
+        files = sorted(files)
         return {
             "required": {
-                "video_path": (IO.STRING, {"placeholder": "X://insert/path/here.mp4", "vhs_path_extensions": video_extensions, "tooltip": "输入或选择视频路径"}),
+                "video_path": (files, {"video_upload": True, "tooltip": "选择或上传视频 (保存到 input 目录)"}),
             },
             "optional": {
                 # 这四个参数用于前端写入坐标（在前端被隐藏）
@@ -180,20 +183,32 @@ class VideoPreviewNode(ComfyNodeABC):
             if not video_path or video_path.strip() == "":
                 return ("", 0, 0, 0, 0)
             
-            # 使用 ComfyUI 的标准文件路径解析
+            # 优先从 input 目录解析（兼容上传/下拉选择的文件名）
+            resolved = None
+            try:
+                # 若为上传/下拉的文件名，优先按注解规则解析
+                # 与 comfy_extras.nodes_video.LoadVideo 一致
+                candidate = folder_paths.get_annotated_filepath(video_path)
+                if os.path.exists(candidate):
+                    resolved = candidate
+            except Exception:
+                resolved = None
+            if not resolved:
+                # 解析路径，兼容相对与绝对路径
+                resolved = resolve_path(video_path)
             
             # 验证视频文件是否存在
-            if not os.path.exists(video_path):
+            if not os.path.exists(resolved):
                 raise FileNotFoundError(f"视频文件不存在: {video_path}")
             
             # 验证是否为视频文件
             video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']
-            file_extension = os.path.splitext(video_path)[1].lower()
+            file_extension = os.path.splitext(resolved)[1].lower()
             if file_extension not in video_extensions:
                 raise ValueError(f"不支持的文件格式: {file_extension}")
             
-            # 返回视频路径和坐标
-            return (video_path, crop_x1, crop_y1, crop_x2, crop_y2)
+            # 返回解析后的路径和坐标
+            return (resolved, crop_x1, crop_y1, crop_x2, crop_y2)
             
         except Exception as e:
             raise Exception(f"视频预览失败: {str(e)}")
