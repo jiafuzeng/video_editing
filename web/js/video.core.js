@@ -99,6 +99,8 @@ async function uploadFile(file) {
             lastModified: file.lastModified,
         });
         body.append("image", new_file);
+        // 默认上传到 input 目录，确保 /view 可访问
+        body.append("type", "input");
         if (i > 0) {
             body.append("subfolder", subfolder);
         }
@@ -268,9 +270,6 @@ function addUploadWidget(nodeType, nodeData, widgetName, type="video") {
 function addVideoPreview(nodeType, isInput=true) {
     chainCallback(nodeType.prototype, "onNodeCreated", function() {
         var element = document.createElement("div");
-        // 恢复默认容器样式
-        element.style.paddingTop = "0px";
-        element.style.boxSizing = "border-box";
         const previewNode = this;
         var previewWidget = this.addDOMWidget("videopreview", "preview", element, {
             serialize: false,
@@ -286,26 +285,15 @@ function addVideoPreview(nodeType, isInput=true) {
         allowDragFromWidget(previewWidget)
         
         previewWidget.computeSize = function(width) {
-            // 优先使用传入宽度；无效时回退到当前节点宽度，避免 0 高导致不可见
-            const baseWidth = (typeof width === 'number' && width > 0)
-                ? width
-                : (previewNode?.size?.[0] || 0);
-            const innerWidth = Math.max(0, baseWidth - 20);
-            const ar = (this.aspectRatio && !isNaN(this.aspectRatio)) ? this.aspectRatio : (16/9);
-
-            if (innerWidth <= 0) {
-                // 返回 -4 让引擎稍后重算，避免把容器高度锁为 0
-                return [width, -4];
+            if (this.aspectRatio && !this.parentEl.hidden) {
+                let height = (previewNode.size[0]-20)/ this.aspectRatio + 10;
+                if (!(height > 0)) {
+                    height = 0;
+                }
+                this.computedHeight = height + 10;
+                return [width, height];
             }
-
-            const contentHeight = Math.max(0, Math.floor(innerWidth / Math.max(0.0001, ar)));
-            if (this.parentEl) {
-                this.parentEl.style.height = contentHeight + 'px';
-            }
-            const padding = 10;
-            const total = contentHeight + padding;
-            this.computedHeight = total;
-            return [width, total];
+            return [width, -4];
         }
         
         previewWidget.value = {
@@ -319,11 +307,6 @@ function addVideoPreview(nodeType, isInput=true) {
         previewWidget.parentEl.className = "vhs_preview";
         previewWidget.parentEl.style['width'] = "100%"
         previewWidget.parentEl.style['position'] = "relative"
-        previewWidget.parentEl.style['margin'] = "0";
-        previewWidget.parentEl.style['borderRadius'] = "";
-        previewWidget.parentEl.style['overflow'] = "hidden"; // 防止视频溢出覆盖下面的参数
-        previewWidget.parentEl.style['background'] = "";
-        previewWidget.parentEl.style['height'] = '';
         element.appendChild(previewWidget.parentEl);
         
         // 创建视频元素
@@ -332,17 +315,12 @@ function addVideoPreview(nodeType, isInput=true) {
         previewWidget.videoEl.loop = true;
         previewWidget.videoEl.muted = true;
         previewWidget.videoEl.style['width'] = "100%"
-        previewWidget.videoEl.style['height'] = "100%"; // 跟随父容器高度
-        previewWidget.videoEl.style['objectFit'] = "contain"; // 等比缩放，避免溢出
-        previewWidget.videoEl.style['display'] = "block";
-        previewWidget.videoEl.style['borderRadius'] = "inherit";
         // 让覆盖层可以拦截鼠标事件
         previewWidget.videoEl.style.pointerEvents = "none"
 
         previewWidget.videoEl.addEventListener("loadedmetadata", () => {
-            previewWidget.aspectRatio = previewWidget.videoEl.videoWidth / Math.max(1, previewWidget.videoEl.videoHeight);
-            // 元数据就绪后请求一次尺寸重算，确保 computeSize 使用到真实纵横比
-            requestAnimationFrame(() => { try { fitHeight(this); } catch(_) {} });
+            previewWidget.aspectRatio = previewWidget.videoEl.videoWidth / previewWidget.videoEl.videoHeight;
+            fitHeight(this);
         });
         
         previewWidget.videoEl.addEventListener("error", () => {
@@ -360,11 +338,7 @@ function addVideoPreview(nodeType, isInput=true) {
         // 创建图像元素
         previewWidget.imgEl = document.createElement("img");
         previewWidget.imgEl.style['width'] = "100%"
-        previewWidget.imgEl.style['height'] = "100%";
-        previewWidget.imgEl.style['objectFit'] = "contain";
         previewWidget.imgEl.hidden = true;
-        previewWidget.imgEl.style['display'] = '';
-        previewWidget.imgEl.style['borderRadius'] = '';
         previewWidget.imgEl.onload = () => {
             previewWidget.aspectRatio = previewWidget.imgEl.naturalWidth / previewWidget.imgEl.naturalHeight;
             fitHeight(this);
@@ -414,12 +388,16 @@ function addVideoPreview(nodeType, isInput=true) {
             params.timestamp = Date.now()
             this.parentEl.hidden = this.value.hidden;
             
+            // 如果前端不存在 VHS 的路径小部件，视为 VHS 功能不可用（后端多半没有 /vhs 路由）
+            const hasVHS = !!(app.widgets && app.widgets.VHSPATH);
+            const useVHS = advp && hasVHS;
+
             if (params.format?.split('/')[0] == 'video'
                 || advp && (params.format?.split('/')[1] == 'gif')
                 || params.format == 'folder') {
 
                 this.videoEl.autoplay = !this.value.paused && !this.value.hidden;
-                if (!advp) {
+                if (!useVHS) {
                     this.videoEl.src = api.apiURL('/view?' + new URLSearchParams(params));
                 } else {
                     let target_width = (previewNode.size[0]-20)*2 || 256;
@@ -434,7 +412,8 @@ function addVideoPreview(nodeType, isInput=true) {
                         params.force_size = target_width+"x"+(target_width/ar)
                     }
                     params.deadline = app.ui.settings.getSettingValue("VideoPreview.AdvancedPreviewsDeadline")
-                    this.videoEl.src = api.apiURL('/vhs/viewvideo?' + new URLSearchParams(params));
+                    // 仅在 VHS 存在时使用 /vhs/viewvideo，否则回退到 /view
+                    this.videoEl.src = api.apiURL((useVHS ? '/vhs/viewvideo?' : '/view?') + new URLSearchParams(params));
                 }
                 this.videoEl.hidden = false;
                 this.imgEl.hidden = true;
@@ -450,6 +429,8 @@ function addVideoPreview(nodeType, isInput=true) {
                 if (!previewWidget?.value?.params?.filename) {
                     return
                 }
+                // VHS 查询仅在 VHS 存在时执行，避免 404
+                if (!(app.widgets && app.widgets.VHSPATH)) return
                 let qurl = api.apiURL('/vhs/queryvideo?' + new URLSearchParams(previewWidget.value.params))
                 let query = undefined
                 try {
@@ -466,8 +447,6 @@ function addVideoPreview(nodeType, isInput=true) {
         previewWidget.callback = previewWidget.updateSource
         previewWidget.parentEl.appendChild(previewWidget.videoEl)
         previewWidget.parentEl.appendChild(previewWidget.imgEl)
-
-        // 保持默认的小组件顺序
     });
 }
 
@@ -811,11 +790,7 @@ function addVideoEditMenu(nodeType) {
                 setHiddenCoord('crop_y1', y1);
                 setHiddenCoord('crop_x2', x2);
                 setHiddenCoord('crop_y2', y2);
-                // 刷新预览源并轻微延迟后重算高度，避免保存后画面瞬间闪动或被控件遮挡
-                try { const params = this.widgets?.find?.(w=>w.name==='video_path')?.value; } catch(_) {}
-                try { previewWidget.updateSource?.(); } catch(_) {}
                 this.setDirtyCanvas?.(true);
-                setTimeout(() => { try { fitHeight(this); } catch(_) {} }, 50);
                 cleanup();
             };
 
@@ -1083,9 +1058,6 @@ app.registerExtension({
             // 添加视频预览功能
             addVideoPreview(nodeType, true);
             
-            // 添加预览选项菜单
-            addPreviewOptions(nodeType);
-            
             // 为输入文件夹添加文件夹上传功能
             addUploadWidget(nodeType, nodeData, "input_folder", "folder");
         }
@@ -1099,27 +1071,10 @@ app.registerExtension({
             addVideoEditMenu(nodeType);
 
             // 上传按钮（选择本地视频并回填）
-            //addUploadWidget(nodeType, nodeData, "video_path", "video");
+            addUploadWidget(nodeType, nodeData, "video_path", "video");
 
             // 绑定路径选择回调，联动预览（路径可来自对话框/手动输入/上传回填）
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
-                // 将 text widget 升级为 VHS 的 VHSPATH 以获得“Path”对话框能力
-                try {
-                    if (app.widgets?.VHSPATH && this.widgets?.length) {
-                        let new_widgets = [];
-                        for (let w of this.widgets) {
-                            const inputCfg = this.constructor?.nodeData?.input;
-                            const cfg = inputCfg?.required?.[w.name] ?? inputCfg?.optional?.[w.name];
-                            if (w?.type === "text" && cfg && cfg[1]?.vhs_path_extensions) {
-                                new_widgets.push(app.widgets.VHSPATH({}, w.name, ["VHSPATH", cfg[1]]));
-                            } else {
-                                new_widgets.push(w);
-                            }
-                        }
-                        this.widgets = new_widgets;
-                    }
-                } catch (_) {}
-
                 const pathWidget = this.widgets?.find?.((w) => w.name === "video_path");
                 if (!pathWidget) return;
                 // 过滤扩展名（用于 VHS 风格路径选择器兼容）
@@ -1131,7 +1086,39 @@ app.registerExtension({
                     const ext = dot >= 0 ? value.slice(dot+1).toLowerCase() : "mp4";
                     let format = ["gif","webp","avif"].includes(ext) ? "image" : "video";
                     format += "/" + ext;
-                    const params = { filename: value, type: "path", format };
+                    // 推断 /view 标准参数：type(input/output/temp) + subfolder + filename
+                    const inferParams = (fullPath) => {
+                        let p = fullPath.replace(/\\/g, '/');
+                        const parts = p.split('/').filter(Boolean);
+                        const idxInput = parts.lastIndexOf('input');
+                        const idxOutput = parts.lastIndexOf('output');
+                        const idxTemp = parts.lastIndexOf('temp');
+                        let type = 'input';
+                        let subfolder = '';
+                        let filename = parts.length ? parts[parts.length - 1] : fullPath;
+                        if (idxInput >= 0) {
+                            type = 'input';
+                            subfolder = parts.slice(idxInput + 1, parts.length - 1).join('/');
+                        } else if (idxOutput >= 0) {
+                            type = 'output';
+                            subfolder = parts.slice(idxOutput + 1, parts.length - 1).join('/');
+                        } else if (idxTemp >= 0) {
+                            type = 'temp';
+                            subfolder = parts.slice(idxTemp + 1, parts.length - 1).join('/');
+                        } else {
+                            // 无法匹配受控根目录，尽量按相对路径处理
+                            const i = p.lastIndexOf('/');
+                            if (i > 0) {
+                                subfolder = p.slice(0, i);
+                                filename = p.slice(i + 1);
+                            }
+                        }
+                        const out = { filename, type };
+                        if (subfolder) out.subfolder = subfolder;
+                        return out;
+                    }
+                    const base = inferParams(value);
+                    const params = { ...base, format };
                     this.updateParameters(params, true);
                 });
             });
