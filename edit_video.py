@@ -133,11 +133,79 @@ class VideoCropNode(ComfyNodeABC):
         except ValueError as e:
             # 输入验证错误
             return ("",)
+
+class VideoPreviewNode(ComfyNodeABC):
+    """
+    视频预览节点
+    支持上传视频文件或指定视频路径，提供视频预览功能
+    """
+    
+    DESCRIPTION = "视频预览节点 - 支持上传或指定视频路径进行预览"
+    CATEGORY = "video/video_editing"
+    
+    @classmethod
+    def INPUT_TYPES(cls) -> InputTypeDict:
+        # 采用 VHS 的 Path 风格：文本输入 + 扩展名过滤，可直接选择任意路径
+        video_extensions = ['webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'wmv', 'flv', 'm4v']
+        return {
+            "required": {
+                "video_path": (IO.STRING, {"placeholder": "X://insert/path/here.mp4", "vhs_path_extensions": video_extensions, "tooltip": "输入或选择视频路径"}),
+            },
+            "optional": {
+                # 这四个参数用于前端写入坐标（在前端被隐藏）
+                "crop_x1": (IO.INT, {"default": 0, "min": 0, "max": 16384, "tooltip": "左上X"}),
+                "crop_y1": (IO.INT, {"default": 0, "min": 0, "max": 16384, "tooltip": "左上Y"}),
+                "crop_x2": (IO.INT, {"default": 0, "min": 0, "max": 16384, "tooltip": "右下X"}),
+                "crop_y2": (IO.INT, {"default": 0, "min": 0, "max": 16384, "tooltip": "右下Y"}),
+            },
+        }
+    
+    RETURN_TYPES = (IO.STRING, IO.INT, IO.INT, IO.INT, IO.INT)
+    RETURN_NAMES = ("video_path", "crop_x1", "crop_y1", "crop_x2", "crop_y2")
+    FUNCTION = "preview_video"
+    OUTPUT_NODE = False
+    
+    def preview_video(self, video_path: str, crop_x1: int = 0, crop_y1: int = 0, crop_x2: int = 0, crop_y2: int = 0):
+        """
+        预览视频文件并获取用户选择的区域坐标
+        
+        Args:
+            video_path: 视频文件路径（来自文件选择器）
+            
+        Returns:
+            tuple: (视频路径, 左上角X坐标, 左上角Y坐标, 右下角X坐标, 右下角Y坐标)
+        """
+        try:
+            # 如果路径为空，返回空值
+            if not video_path or video_path.strip() == "":
+                return ("", 0, 0, 0, 0)
+            
+            # 使用 ComfyUI 的标准文件路径解析
+            
+            # 验证视频文件是否存在
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"视频文件不存在: {video_path}")
+            
+            # 验证是否为视频文件
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']
+            file_extension = os.path.splitext(video_path)[1].lower()
+            if file_extension not in video_extensions:
+                raise ValueError(f"不支持的文件格式: {file_extension}")
+            
+            # 返回视频路径和坐标
+            return (video_path, crop_x1, crop_y1, crop_x2, crop_y2)
+            
+        except Exception as e:
+            raise Exception(f"视频预览失败: {str(e)}")
+
+
 # 节点映射
 NODE_CLASS_MAPPINGS = {
-    "VideoCropNode": VideoCropNode
+    "VideoCropNode": VideoCropNode,
+    "VideoPreviewNode": VideoPreviewNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "VideoCropNode": "视频画幅裁切"
+    "VideoCropNode": "视频画幅裁切",
+    "VideoPreviewNode": "视频预览"
 }
