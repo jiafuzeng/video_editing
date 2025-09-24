@@ -12,7 +12,7 @@ from .utils import generate_unique_folder_name, resolve_path
 # 配置logger
 logger = logging.getLogger(__name__)
 
-class VideoMergeNode(ComfyNodeABC):
+class VideoMergeNode2(ComfyNodeABC):
     """
     视频合并节点
     将素材视频和主视频按照指定位置关系合并
@@ -447,8 +447,6 @@ class VideoMergeNode(ComfyNodeABC):
             output_paths = []
             
             for main_video in main_videos:
-                if material_index >= len(material_videos):
-                    break  # 素材用完则结束
                 
                 try:
                     # 获取主视频信息
@@ -472,28 +470,42 @@ class VideoMergeNode(ComfyNodeABC):
                     used_materials = []
                     current_duration = 0
                     
-                    # 为当前主视频收集足够的素材
-                    while current_duration < main_duration and material_index < len(material_videos):
-                        material_video = material_videos[material_index]
-                        material_info = self.get_video_info(material_video)
-                        
-                        if not material_info:
-                            material_index += 1
-                            continue
-                        
-                        # 检查素材视频音频情况
-                        material_filename = Path(material_video).stem
-                        if audio_mode == "mix" and not material_info['has_audio']:
-                            logger.warning(f"警告: 素材视频 {material_filename} 没有音频，在mix模式下可能影响混音效果")
-                        
-                        used_materials.append({
-                            'path': material_video,
-                            'duration': material_info['duration'],
-                            'info': material_info
-                        })
-                        
-                        current_duration += material_info['duration']
-                        material_index += 1
+                    # 为当前主视频收集足够的素材（循环复用素材列表）
+                    if len(material_videos) > 0:
+                        loop_guard = 0
+                        while current_duration < main_duration:
+                            # 取模循环索引，复用素材
+                            idx = material_index % len(material_videos)
+                            material_video = material_videos[idx]
+                            material_info = self.get_video_info(material_video)
+
+                            # 下一次从下一个素材开始
+                            material_index = (material_index + 1) % len(material_videos)
+
+                            if not material_info:
+                                # 素材不可用，推进保护计数，避免死循环
+                                loop_guard += 1
+                                if loop_guard >= len(material_videos) and not used_materials:
+                                    # 整轮都不可用且还未收集到任何素材，跳出避免死循环
+                                    logger.warning("警告: 所有素材均不可用，跳过该主视频的素材收集")
+                                    break
+                                continue
+
+                            # 有效素材，重置保护计数
+                            loop_guard = 0
+
+                            # 检查素材视频音频情况
+                            material_filename = Path(material_video).stem
+                            if audio_mode == "mix" and not material_info['has_audio']:
+                                logger.warning(f"警告: 素材视频 {material_filename} 没有音频，在mix模式下可能影响混音效果")
+
+                            used_materials.append({
+                                'path': material_video,
+                                'duration': material_info['duration'],
+                                'info': material_info
+                            })
+
+                            current_duration += material_info['duration']
                     
                     if not used_materials:
                         continue
@@ -673,9 +685,9 @@ class VideoMergeNode(ComfyNodeABC):
 
 # 节点映射
 NODE_CLASS_MAPPINGS = {
-    "VideoMergeNode": VideoMergeNode
+    "VideoMergeNode2": VideoMergeNode2
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "VideoMergeNode": "视频画幅合并"
+    "VideoMergeNode2": "视频画幅合并_素材复用"
 }
