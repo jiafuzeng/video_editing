@@ -384,6 +384,44 @@ def export_video_without_segments(video_path, segments, output_path):
     except Exception:
         return False
 
+
+def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
+    """将删除区间反转为保留区间，并将每个保留区间单独导出为一个视频文件。
+    segments_to_remove: [(start_sec, end_sec), ...]
+    返回: 导出成功的文件列表
+    """
+    try:
+        duration = _probe_duration_seconds(video_path)
+        keep_ranges = _invert_segments(segments_to_remove, duration)
+        if not keep_ranges:
+            logger.warning("没有可保留的区间，跳过导出")
+            return []
+
+        exported_files = []
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        ext = os.path.splitext(os.path.basename(video_path))[1]
+
+        for idx, (start, end) in enumerate(keep_ranges, start=1):
+            clip_name = f"{base_name}_kept_{idx:03d}{ext}"
+            clip_path = os.path.join(output_dir, clip_name)
+            try:
+                (
+                    ffmpeg
+                    .input(video_path, ss=start, to=end)
+                    .output(clip_path, vcodec='libx264', acodec='aac', movflags='faststart', video_bitrate='3000k', audio_bitrate='192k', vsync='vfr')
+                    .overwrite_output()
+                    .run(quiet=True)
+                )
+                exported_files.append(clip_path)
+                logger.info(f"导出保留片段: {clip_name} [{start:.3f}, {end:.3f}]")
+            except Exception as e:
+                logger.error(f"导出片段失败 {clip_name}: {str(e)}")
+
+        return exported_files
+    except Exception as e:
+        logger.error(f"导出保留区间时发生错误: {str(e)}")
+        return []
+
 # --- Step3: 匹配视频片段 ---
 def match_video(query_hashes, target_hashes, threshold=5):
     """找到所有匹配的视频片段"""
@@ -784,26 +822,25 @@ class VideoHashCutNode(ComfyNodeABC):
                 all_segments.extend(segments)
                 logger.info(f"片段 {clip_file} 检测到 {len(segments)} 个匹配位置")
             
-            # 合并相邻片段并导出视频
-            results = merge_segments(all_segments, merge_gap_seconds)
-            segments_for_export = [(s["start"], s["end"]) for s in results if isinstance(s, dict) and "start" in s and "end" in s]
-            success = export_video_without_segments(recording_file, segments_for_export, output_dir)
+            # 不再合并，直接将“待删除区间”反转为保留区间，并逐段导出
+            segments_for_remove = [(s["start"], s["end"]) for s in all_segments if isinstance(s, dict) and "start" in s and "end" in s]
+            exported_files = export_keep_ranges_as_files(recording_file, segments_for_remove, output_dir)
             
             # 清理临时文件夹
             if temp_dir:
                 cleanup_temp_folder(temp_dir)
             
-            if success:
+            if exported_files:
                 return {
                     'game_name': os.path.basename(recording_file),
-                    'target_video': os.path.join(output_dir, os.path.basename(recording_file)),
-                    'segments_count': len(segments_for_export)
+                    'target_video': exported_files[0],
+                    'segments_count': len(exported_files)
                 }
             else:
                 return {
                     'game_name': os.path.basename(recording_file),
                     'target_video': None,
-                    'segments_count': len(segments_for_export)
+                    'segments_count': 0
                 }
             
         except Exception as e:
