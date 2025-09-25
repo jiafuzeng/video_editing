@@ -148,7 +148,6 @@ class VideoMergeNode2(ComfyNodeABC):
             if original_width == target_width:
                 logger.info(f"视频宽度已为目标宽度 {target_width}px，直接复制: {os.path.basename(input_path)}")
                 try:
-                    import shutil
                     shutil.copy2(input_path, output_path)
                     return True
                 except Exception as copy_err:
