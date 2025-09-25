@@ -423,14 +423,15 @@ def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
         return []
 
 
-def split_folder_videos_to_1s_clips(input_dir: str) -> str:
-    """将文件夹内所有视频按 1s 切分到一个新的临时目录，返回该目录路径。
+def split_folder_videos_to_clips(input_dir: str, segment_seconds: float = 1.0) -> str:
+    """将文件夹内所有视频按 segment_seconds 切分到一个新的临时目录，返回该目录路径。
     - 不修改原目录内容
     - 生成的片段命名包含源文件名避免冲突
     """
-    clip_dir = tempfile.mkdtemp(prefix="clip_1s_")
-    logger.info(f"创建1s片段临时目录: {clip_dir}")
+    clip_dir = tempfile.mkdtemp(prefix="clip_seg_")
+    logger.info(f"创建切分片段临时目录: {clip_dir}，时长: {segment_seconds}s")
 
+    segment_seconds = max(0.2, float(segment_seconds))
     video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v')
     for name in os.listdir(input_dir):
         src = os.path.join(input_dir, name)
@@ -442,43 +443,97 @@ def split_folder_videos_to_1s_clips(input_dir: str) -> str:
         base, ext = os.path.splitext(os.path.basename(src))
         out_pattern = os.path.join(clip_dir, f"{base}_%05d{ext}")
         try:
-            (
-                ffmpeg
-                .input(src)
-                .output(
-                    out_pattern,
-                    f='segment',
-                    segment_time=1,
-                    reset_timestamps=1,
-                    vcodec='libx264',
-                    acodec='aac',
-                    movflags='faststart',
-                    video_bitrate='3000k',
-                    audio_bitrate='192k',
-                    vsync='vfr'
+            # 读取时长，决定是否切分以及如何处理尾巴不整除
+            try:
+                probe = ffmpeg.probe(src)
+                duration = float(probe.get('format', {}).get('duration', 0.0))
+            except Exception:
+                duration = 0.0
+
+            seg = max(0.2, float(segment_seconds))
+
+            # 情况1：视频时长不够一个 segment_seconds，则不切分，将原视频复制到临时目录
+            if duration > 0 and duration < seg:
+                single_out = os.path.join(clip_dir, f"{base}_00001{ext}")
+                try:
+                    import shutil
+                    shutil.copy2(src, single_out)
+                    logger.info(f"时长 {duration:.2f}s < {seg:.2f}s，不切分，已复制: {name}")
+                except Exception as copy_err:
+                    logger.error(f"复制失败 {name} -> {single_out}: {copy_err}")
+
+            else:
+                # 情况2：正常固定时长分割，最后一段允许为短尾
+                (
+                    ffmpeg
+                    .input(src)
+                    .output(
+                        out_pattern,
+                        f='segment',
+                        segment_time=seg,
+                        reset_timestamps=1,
+                        vcodec='libx264',
+                        acodec='aac',
+                        movflags='faststart',
+                        video_bitrate='3000k',
+                        audio_bitrate='192k',
+                        vsync='vfr'
+                    )
+                    .overwrite_output()
+                    .run(quiet=True)
                 )
-                .overwrite_output()
-                .run(quiet=True)
-            )
-            logger.info(f"切分完成: {name}")
+                logger.info(f"固定时长 {seg:.2f}s 分割完成: {name}")
         except Exception as e:
             logger.error(f"切分失败 {name}: {str(e)}")
 
     return clip_dir
 
+
+def precompute_clip_hashes(clip_dir: str) -> dict:
+    """预计算片段哈希，返回 {clip_path: hashes_list}。
+    仅计算哈希，不返回时间戳，供匹配使用。
+    """
+    cache = {}
+    files = sorted([f for f in os.listdir(clip_dir) if os.path.isfile(os.path.join(clip_dir, f))])
+    logger.info(f"开始预计算片段哈希，共 {len(files)} 个文件")
+    for name in files:
+        path = os.path.join(clip_dir, name)
+        hashes, _ = video_to_phash(path)
+        if hashes:
+            cache[path] = hashes
+    logger.info(f"预计算完成，可用片段 {len(cache)} 个")
+    return cache
+
 # --- Step3: 匹配视频片段 ---
 def match_video(query_hashes, target_hashes, threshold=5):
-    """找到所有匹配的视频片段"""
+    """找到所有匹配的视频片段（精确计算）。
+    使用安全早停：一旦累计距离 > threshold * qlen，即便后续距离为0也不可能通过，提前终止该窗口。
+    该优化不降低精度，结果与完整计算一致。
+    """
     qlen = len(query_hashes)
+    if qlen == 0:
+        return []
+
     matches = []
-    
-    for i in range(len(target_hashes) - qlen + 1):
-        # 计算窗口内的平均汉明距离（改进哈希后直接沿用）
-        dist = np.mean([query_hashes[j] - target_hashes[i+j] for j in range(qlen)])
-        if dist <= threshold:
-            matches.append((i, dist))
-    
-    # 按距离排序，距离越小越相似
+    max_start = len(target_hashes) - qlen
+    if max_start < 0:
+        return []
+
+    limit_sum = threshold * float(qlen)
+    for i in range(max_start + 1):
+        running_sum = 0.0
+        # 带安全早停的累计求和
+        for j in range(qlen):
+            running_sum += (query_hashes[j] - target_hashes[i + j])
+            if running_sum > limit_sum:
+                # 即使后续都为0，最终平均也无法 <= threshold
+                break
+        else:
+            # 未触发早停，计算平均值并记录
+            avg_dist = running_sum / float(qlen)
+            if avg_dist <= threshold:
+                matches.append((i, avg_dist))
+
     matches.sort(key=lambda x: x[1])
     return matches
 
@@ -713,6 +768,7 @@ class VideoHashCutNode(ComfyNodeABC):
         # 设置默认参数值（这些参数不在UI中显示，使用优化后的默认值）
         min_gap_seconds = 5.0          # 匹配结果间最小间隔（秒），避免过于频繁的片段分割
         merge_gap_seconds = 1.0         # 合并片段的最大间隔（秒），小于此间隔的片段会被合并
+        segment_seconds = 1.0
         # 注意：已移除静止片段检测相关参数，简化处理流程
         try:
             # 解析录播视频路径（使用utils封装）
@@ -741,15 +797,14 @@ class VideoHashCutNode(ComfyNodeABC):
                 return ("",)
             logger.info(f"处理视频片段文件夹: {clip_dir}")
             
-            # 在线程外先将片段切分为1秒小段，传入线程使用
-            clip_1s_dir = split_folder_videos_to_1s_clips(clip_dir)
-            logger.info(f"1秒片段目录: {clip_1s_dir}")
+            # 在线程外先将片段切分为固定时长小段，传入线程使用
+            clip_seg_dir = split_folder_videos_to_clips(clip_dir, segment_seconds)
+            logger.info(f"{segment_seconds}秒片段目录: {clip_seg_dir}")
             
-            # 获取视频片段文件（支持多种格式）
-            clip_files = get_video_files(clip_1s_dir)
-            
-            if not clip_files:
-                logger.error(f"视频片段文件夹 {clip_1s_dir} 中没有找到视频文件")
+            # 主线程：预计算片段哈希缓存
+            clip_hash_cache = precompute_clip_hashes(clip_seg_dir)
+            if not clip_hash_cache:
+                logger.error(f"片段哈希缓存为空，目录: {clip_seg_dir}")
                 return ("",)
             
             # 准备任务列表 - 为录播视频文件夹中的每个文件创建处理任务
@@ -758,11 +813,12 @@ class VideoHashCutNode(ComfyNodeABC):
                 # 构建任务参数：每个录播视频文件与片段文件夹进行匹配
                 task_params = {
                     'recording_file': os.path.join(recording_video_path, re_file),  # 单个录播视频文件路径
-                    'clip_dir': clip_1s_dir,                                       # 1秒片段文件夹路径
-                    'match_threshold': match_threshold,                            # 视频匹配阈值
-                    'min_gap_seconds': min_gap_seconds,                           # 匹配结果间最小间隔
-                    'merge_gap_seconds': merge_gap_seconds,                        # 合并片段的最大间隔
-                    'output_dir': output_dir                                      # 输出文件夹路径
+                    'clip_1s_dir': clip_seg_dir,                                      # 切分片段文件夹路径
+                    'clip_hash_cache': clip_hash_cache,                               # 预计算片段哈希
+                    'match_threshold': match_threshold,                               # 视频匹配阈值
+                    'min_gap_seconds': min_gap_seconds,                               # 匹配结果间最小间隔
+                    'merge_gap_seconds': merge_gap_seconds,                           # 合并片段的最大间隔
+                    'output_dir': output_dir                                          # 输出文件夹路径
                 }
                 tasks.append(task_params)
                 logger.info(f"  添加任务: {video_clip_path} -> {os.path.basename(re_file)}")
@@ -812,9 +868,9 @@ class VideoHashCutNode(ComfyNodeABC):
             finally:
                 # 线程结束后删除1秒片段目录
                 try:
-                    if clip_1s_dir and os.path.exists(clip_1s_dir):
-                        cleanup_temp_folder(clip_1s_dir)
-                        logger.info(f"已删除1秒片段目录: {clip_1s_dir}")
+                    if clip_seg_dir and os.path.exists(clip_seg_dir):
+                        cleanup_temp_folder(clip_seg_dir)
+                        logger.info(f"已删除切分片段目录: {clip_seg_dir}")
                 except Exception as e:
                     logger.warning(f"删除1秒片段目录失败: {str(e)}")
 
@@ -839,6 +895,7 @@ class VideoHashCutNode(ComfyNodeABC):
         # 从字典中提取参数
         recording_file = task_params['recording_file']      # 录播视频文件路径
         clip_1s_dir = task_params['clip_1s_dir']            # 1秒片段视频文件夹路径
+        clip_hash_cache = task_params.get('clip_hash_cache', {}) # 预计算片段哈希
         match_threshold = task_params['match_threshold']    # 视频匹配阈值
         min_gap_seconds = task_params['min_gap_seconds']    # 匹配结果间最小间隔
         merge_gap_seconds = task_params['merge_gap_seconds'] # 合并片段的最大间隔
@@ -851,21 +908,14 @@ class VideoHashCutNode(ComfyNodeABC):
             temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
                 recording_file, clip_1s_dir, target_resolution=None  # 自动检测录播视频分辨率
             )
-            
-
             # 步骤1：计算录播视频的感知哈希和时间戳
             target_hashes, ts_target = video_to_phash(temp_recording_file)
             
             # 初始化所有片段的时间片段列表
             all_segments = []
 
-            # 步骤2：遍历片段文件夹中的所有视频文件
-            for clip_file in os.listdir(temp_clip_dir):
-                # 构建片段视频的完整路径
-                clip_file_path = os.path.join(temp_clip_dir, clip_file)
-                
-                # 步骤3：计算片段视频的感知哈希
-                clip_file_hashes, _ = video_to_phash(clip_file_path)
+            # 步骤2：遍历预计算的片段哈希进行匹配
+            for clip_file_path, clip_file_hashes in clip_hash_cache.items():
                 
                 # 步骤4：在录播视频中查找与片段视频匹配的位置
                 all_matches = match_video(clip_file_hashes, target_hashes, threshold=match_threshold)
@@ -878,7 +928,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 
                 # 将当前片段的时间片段添加到总列表中
                 all_segments.extend(segments)
-                logger.info(f"片段 {clip_file} 检测到 {len(segments)} 个匹配位置")
+                logger.info(f"片段 {os.path.basename(clip_file_path)} 检测到 {len(segments)} 个匹配位置")
             
             # 不再合并，直接将“待删除区间”反转为保留区间，并逐段导出
             segments_for_remove = [(s["start"], s["end"]) for s in all_segments if isinstance(s, dict) and "start" in s and "end" in s]
