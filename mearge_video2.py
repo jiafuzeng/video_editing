@@ -6,6 +6,7 @@ from pathlib import Path
 import ffmpeg
 import folder_paths
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
 from .utils import generate_unique_folder_name, resolve_path
 
@@ -459,14 +460,12 @@ class VideoMergeNode2(ComfyNodeABC):
             if not material_videos:
                 return ("",)
             
-            # 处理每个主视频
-            processed_count = 0
+            # 预分配任务，避免多线程冲突
+            tasks = []
             material_index = 0
             gif_index = 0
-            output_paths = []
             
             for main_video in main_videos:
-                
                 try:
                     # 获取主视频信息
                     main_info = self.get_video_info(main_video)
@@ -483,7 +482,6 @@ class VideoMergeNode2(ComfyNodeABC):
                     if gif_files:
                         current_gif_path = gif_files[gif_index % len(gif_files)]
                         gif_index += 1
-                        logger.info(f"主视频 {main_filename} 使用GIF: {os.path.basename(current_gif_path)}")
                     
                     main_duration = main_info['duration']
                     used_materials = []
@@ -530,161 +528,210 @@ class VideoMergeNode2(ComfyNodeABC):
                         continue
                     
                     # 生成输出文件名
-                    main_filename = Path(main_video).stem
                     output_file = os.path.join(output_path, f"{main_filename}_merged.mp4")
                     
-                    # 创建临时合并的素材视频
-                    temp_dir = tempfile.mkdtemp()
-                    temp_material_path = os.path.join(temp_dir, f"temp_material_{main_filename}.mp4")
+                    # 创建任务
+                    task = {
+                        'main_video': main_video,
+                        'main_info': main_info,
+                        'main_duration': main_duration,
+                        'output_file': output_file,
+                        'gif_path': current_gif_path,
+                        'used_materials': used_materials,
+                        'main_video_source': main_video_source,
+                        'position': position,
+                        'audio_mode': audio_mode,
+                        'upper_audio_volume': upper_audio_volume,
+                        'lower_audio_volume': lower_audio_volume
+                    }
+                    tasks.append(task)
                     
-                    # 获取主视频的宽度
-                    main_info = self.get_video_info(main_video)
+                except Exception as e:
+                    logger.error(f"预分配任务时处理主视频 {main_video} 出错: {str(e)}")
+                    continue
+            
+            if not tasks:
+                return ("",)
+            
+            # 使用多线程处理任务
+            processed_count = 0
+            output_paths = []
+            
+            # 设置线程池大小，减少资源争用
+            max_workers = min(4, max(1, os.cpu_count() - 2 or 2))
+            logger.info(f"使用 {max_workers} 个线程并发处理 {len(tasks)} 个任务")
+            
+            def process_task(task):
+                import threading
+                thread_id = threading.current_thread().ident
+                
+                main_video = task['main_video']
+                main_info = task['main_info']
+                main_duration = task['main_duration']
+                output_file = task['output_file']
+                current_gif_path = task['gif_path']
+                used_materials = task['used_materials']
+                main_video_source = task['main_video_source']
+                position = task['position']
+                audio_mode = task['audio_mode']
+                upper_audio_volume = task['upper_audio_volume']
+                lower_audio_volume = task['lower_audio_volume']
+
+                try:
+                    main_filename = Path(main_video).stem
+                    if current_gif_path:
+                        logger.info(f"[线程{thread_id}] 主视频 {main_filename} 使用GIF: {os.path.basename(current_gif_path)}")
+
+                    # 使用线程ID确保临时目录唯一性
+                    temp_dir = tempfile.mkdtemp(prefix=f"merge_{thread_id}_")
+                    temp_material_path = os.path.join(temp_dir, f"temp_material_{main_filename}_{thread_id}.mp4")
+
                     main_width = main_info['width']
-                    
-                    # 在mix模式下进行最终的音频检查
+
                     if audio_mode == "mix":
-                        # 检查所有使用的素材是否有音频
                         materials_with_audio = [m for m in used_materials if m['info']['has_audio']]
                         materials_without_audio = [m for m in used_materials if not m['info']['has_audio']]
-                        
                         if not main_info['has_audio'] and not materials_with_audio:
-                            logger.error(f"错误: 主视频 {main_filename} 和所有素材视频都没有音频，无法进行混音处理")
-                            continue
+                            logger.error(f"[线程{thread_id}] 错误: 主视频 {main_filename} 和所有素材视频都没有音频，无法进行混音处理")
+                            return None
                         elif not main_info['has_audio']:
-                            logger.warning(f"警告: 主视频 {main_filename} 没有音频，将只使用素材音频")
+                            logger.warning(f"[线程{thread_id}] 警告: 主视频 {main_filename} 没有音频，将只使用素材音频")
                         elif not materials_with_audio:
-                            logger.warning(f"警告: 所有素材视频都没有音频，将只使用主视频音频")
+                            logger.warning(f"[线程{thread_id}] 警告: 所有素材视频都没有音频，将只使用主视频音频")
                         elif materials_without_audio:
-                            logger.warning(f"警告: {len(materials_without_audio)} 个素材视频没有音频，可能影响混音效果")
-                    
-                    if True:
-                        resized_materials = []
-                        for i, material in enumerate(used_materials):
-                            resized_path = os.path.join(temp_dir, f"resized_material_{i}.mp4")
-                            if self.resize_video_to_width(material['path'], main_width, resized_path):
-                                # 确保每个片段都有音频流；若原片段无音频，则补一条静音音轨
-                                if material['info']['has_audio']:
-                                    resized_materials.append(resized_path)
-                                else:
+                            logger.warning(f"[线程{thread_id}] 警告: {len(materials_without_audio)} 个素材视频没有音频，可能影响混音效果")
+
+                    resized_materials = []
+                    for i, material in enumerate(used_materials):
+                        resized_path = os.path.join(temp_dir, f"resized_material_{i}_{thread_id}.mp4")
+                        if self.resize_video_to_width(material['path'], main_width, resized_path):
+                            if material['info']['has_audio']:
+                                resized_materials.append(resized_path)
+                            else:
+                                try:
+                                    resized_with_audio = os.path.join(temp_dir, f"resized_material_{i}_a_{thread_id}.mp4")
+                                    silence = (ffmpeg.input('anullsrc=channel_layout=stereo:sample_rate=44100', f='lavfi', t=material['duration']).audio)
+                                    video_stream = ffmpeg.input(resized_path).video
+                                    (
+                                        ffmpeg
+                                        .output(video_stream, silence, resized_with_audio, vcodec='libx264', acodec='aac', preset='medium')
+                                        .overwrite_output()
+                                        .run(quiet=True)
+                                    )
+                                    resized_materials.append(resized_with_audio)
                                     try:
-                                        resized_with_audio = os.path.join(temp_dir, f"resized_material_{i}_a.mp4")
-                                        silence = (
-                                            ffmpeg
-                                            .input('anullsrc=channel_layout=stereo:sample_rate=44100', f='lavfi', t=material['duration'])
-                                            .audio
-                                        )
-                                        video_stream = ffmpeg.input(resized_path).video
-                                        (
-                                            ffmpeg
-                                            .output(video_stream, silence, resized_with_audio, vcodec='libx264', acodec='aac', preset='medium')
-                                            .overwrite_output()
-                                            .run(quiet=True)
-                                        )
-                                        resized_materials.append(resized_with_audio)
-                                        try:
-                                            os.remove(resized_path)
-                                        except:
-                                            pass
-                                    except Exception:
-                                        # 回退：若补静音失败，仍然加入原片段（可能导致后续concat失败）
-                                        resized_materials.append(resized_path)
-                        
-                        if not resized_materials:
-                            continue
-                        
-                        # 创建concat文件列表
-                        concat_file = os.path.join(temp_dir, f"concat_list_{main_filename}.txt")
-                        with open(concat_file, 'w') as f:
-                            for resized_material in resized_materials:
-                                f.write(f"file '{resized_material}'\n")
-                        
-                        # 使用concat demuxer拼接视频，兼容音频情况
-                        # 检查是否有任何素材有音频
-                        has_any_audio = any(m['info']['has_audio'] for m in used_materials)
-                        
-                        if has_any_audio:
-                            # 有音频的情况
-                            (
-                                ffmpeg
-                                .input(concat_file, format='concat', safe=0)
-                                .output(temp_material_path, vcodec='libx264', acodec='aac', preset='medium')
-                                .overwrite_output()
-                                .run(quiet=True)
-                            )
-                        else:
-                            # 没有音频的情况
-                            (
-                                ffmpeg
-                                .input(concat_file, format='concat', safe=0)
-                                .output(temp_material_path, vcodec='libx264', preset='medium')
-                                .overwrite_output()
-                                .run(quiet=True)
-                            )
-                        
-                        # 清理concat文件和临时缩放文件
-                        try:
-                            os.remove(concat_file)
-                            for resized_material in resized_materials:
-                                os.remove(resized_material)
-                        except:
-                            pass
-                        
-                        # 检查合并后的素材时长是否足够支持主视频时长
-                        temp_material_info = self.get_video_info(temp_material_path)
-                        if not temp_material_info:
-                            logger.warning(f"  警告: 无法获取合并后素材视频信息，跳过主视频: {main_filename}")
-                            continue
-                        
-                        temp_material_duration = temp_material_info['duration']
-                        if temp_material_duration < main_duration:
-                            logger.warning(f"  警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持主视频时长 ({main_duration:.2f}秒)，跳过主视频: {main_filename}")
-                            continue
-                        
-                        logger.info(f"  合并后素材时长: {temp_material_duration:.2f}秒，主视频时长: {main_duration:.2f}秒")
-                        
-                        # 截取到主视频长度，兼容音频情况
-                        temp_material_cropped = os.path.join(temp_dir, f"temp_material_cropped_{main_filename}.mp4")
-                        
-                        if temp_material_info and temp_material_info['has_audio']:
-                            # 有音频的情况
-                            (
-                                ffmpeg
-                                .input(temp_material_path, t=main_duration)
-                                .output(temp_material_cropped, vcodec='libx264', acodec='aac', preset='medium')
-                                .overwrite_output()
-                                .run(quiet=True)
-                            )
-                        else:
-                            # 没有音频的情况
-                            (
-                                ffmpeg
-                                .input(temp_material_path, t=main_duration)
-                                .output(temp_material_cropped, vcodec='libx264', preset='medium')
-                                .overwrite_output()
-                                .run(quiet=True)
-                            )
-                        
-                        # 替换临时文件
-                        os.remove(temp_material_path)
-                        temp_material_path = temp_material_cropped
+                                        os.remove(resized_path)
+                                    except:
+                                        pass
+                                except Exception:
+                                    # 回退：若补静音失败，仍然加入原片段（可能导致后续concat失败）
+                                    resized_materials.append(resized_path)
+                    
+                    if not resized_materials:
+                        return None
+                    
+                    # 创建concat文件列表
+                    concat_file = os.path.join(temp_dir, f"concat_list_{main_filename}_{thread_id}.txt")
+                    with open(concat_file, 'w') as f:
+                        for resized_material in resized_materials:
+                            f.write(f"file '{resized_material}'\n")
+                    
+                    # 使用concat demuxer拼接视频，兼容音频情况
+                    # 检查是否有任何素材有音频
+                    has_any_audio = any(m['info']['has_audio'] for m in used_materials)
+                    
+                    if has_any_audio:
+                        # 有音频的情况
+                        (
+                            ffmpeg
+                            .input(concat_file, format='concat', safe=0)
+                            .output(temp_material_path, vcodec='libx264', acodec='aac', preset='medium')
+                            .overwrite_output()
+                            .run(quiet=True)
+                        )
+                    else:
+                        # 没有音频的情况
+                        (
+                            ffmpeg
+                            .input(concat_file, format='concat', safe=0)
+                            .output(temp_material_path, vcodec='libx264', preset='medium')
+                            .overwrite_output()
+                            .run(quiet=True)
+                        )
+                    
+                    # 清理concat文件和临时缩放文件
+                    try:
+                        os.remove(concat_file)
+                        for resized_material in resized_materials:
+                            os.remove(resized_material)
+                    except:
+                        pass
+                    
+                    # 检查合并后的素材时长是否足够支持主视频时长
+                    temp_material_info = self.get_video_info(temp_material_path)
+                    if not temp_material_info:
+                        logger.warning(f"[线程{thread_id}] 警告: 无法获取合并后素材视频信息，跳过主视频: {main_filename}")
+                        return None
+                    
+                    temp_material_duration = temp_material_info['duration']
+                    if temp_material_duration < main_duration:
+                        logger.warning(f"[线程{thread_id}] 警告: 合并后素材时长 ({temp_material_duration:.2f}秒) 不足以支持主视频时长 ({main_duration:.2f}秒)，跳过主视频: {main_filename}")
+                        return None
+                    
+                    logger.info(f"[线程{thread_id}] 合并后素材时长: {temp_material_duration:.2f}秒，主视频时长: {main_duration:.2f}秒")
+                    
+                    # 截取到主视频长度，兼容音频情况
+                    temp_material_cropped = os.path.join(temp_dir, f"temp_material_cropped_{main_filename}_{thread_id}.mp4")
+                    
+                    if temp_material_info and temp_material_info['has_audio']:
+                        # 有音频的情况
+                        (
+                            ffmpeg
+                            .input(temp_material_path, t=main_duration)
+                            .output(temp_material_cropped, vcodec='libx264', acodec='aac', preset='medium')
+                            .overwrite_output()
+                            .run(quiet=True)
+                        )
+                    else:
+                        # 没有音频的情况
+                        (
+                            ffmpeg
+                            .input(temp_material_path, t=main_duration)
+                            .output(temp_material_cropped, vcodec='libx264', preset='medium')
+                            .overwrite_output()
+                            .run(quiet=True)
+                        )
+                    
+                    # 替换临时文件
+                    os.remove(temp_material_path)
+                    temp_material_path = temp_material_cropped
                     
                     # 合并素材和主视频
                     # 根据main_video_source确定主视频是否来自上方
                     is_main_from_upper = (main_video_source == "upper")
                     if self.merge_videos_vertically(temp_material_path, main_video, output_file, position, audio_mode, upper_audio_volume, lower_audio_volume, current_gif_path, is_main_from_upper):
-                        processed_count += 1
-                        output_paths.append(output_file)
-                        logger.info(f"成功合并: {main_filename} -> {output_file}")
+                        logger.info(f"[线程{thread_id}] 成功合并: {main_filename} -> {output_file}")
+                        return output_file
                     
+                    return None
+                    
+                except Exception as e:
+                    logger.error(f"[线程{thread_id}] 处理主视频 {main_video} 时出错: {str(e)}")
+                    return None
+                finally:
                     # 清理临时文件和目录
                     try:
                         shutil.rmtree(temp_dir)
                     except:
                         pass
-                    
-                except Exception as e:
-                    logger.error(f"处理主视频 {main_video} 时出错: {str(e)}")
-                    continue
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_task = {executor.submit(process_task, t): t for t in tasks}
+                for future in as_completed(future_to_task):
+                    result_path = future.result()
+                    if result_path:
+                        processed_count += 1
+                        output_paths.append(result_path)
             
             if processed_count == 0:
                 return ("",)  # 没有可保存的视频时返回空字符串
