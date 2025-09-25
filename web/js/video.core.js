@@ -1059,7 +1059,7 @@ app.registerExtension({
             addVideoPreview(nodeType, true);
             
             // 为输入文件夹添加文件夹上传功能
-            addUploadWidget(nodeType, nodeData, "input_folder", "folder");
+            //addUploadWidget(nodeType, nodeData, "input_folder", "folder");
         }
         
         // 为视频预览节点添加预览功能
