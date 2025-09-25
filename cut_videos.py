@@ -1,3 +1,4 @@
+from re import M
 import ffmpeg
 import os
 import threading
@@ -523,7 +524,8 @@ class VideoCutNode(ComfyNodeABC):
             logging.info(f"线程数: 10")
             
             # 执行批量视频处理
-            process_videos_folder(input_folder_path, cut_duration, None, batch_output_dir, 10, None)
+            max_workers = min(8, max(1, os.cpu_count() - 2 or 1))
+            process_videos_folder(input_folder_path, cut_duration, None, batch_output_dir, max_workers, None)
             
             return (batch_output_dir,)
             
@@ -582,19 +584,20 @@ class VideoAddNode(ComfyNodeABC):
             os.makedirs(batch_output_dir, exist_ok=True)
             
             # 处理文件夹中的所有视频
+            max_workers = min(8, max(1, os.cpu_count() - 2 or 1))
             logging.info(f"开始处理文件夹: {input_folder}")
             logging.info(f"要添加的视频: {add_video}")
             logging.info(f"添加位置: {'前' if add_position == 'before' else '后'}")
             logging.info(f"输出目录: {batch_output_dir}")
-            logging.info(f"线程数: 10")
+            logging.info(f"线程数: {max_workers}")
             
             # 根据添加位置选择处理函数
             if add_position == "before":
                 # 在主视频前添加
-                prepend_start_to_videos_folder(input_folder_path, add_video_path, batch_output_dir, 10)
+                prepend_start_to_videos_folder(input_folder_path, add_video_path, batch_output_dir, max_workers)
             else:
                 # 在主视频后添加
-                append_end_to_videos_folder(input_folder_path, add_video_path, batch_output_dir, 10)
+                append_end_to_videos_folder(input_folder_path, add_video_path, batch_output_dir, max_workers)
             
             return (batch_output_dir,)
             
