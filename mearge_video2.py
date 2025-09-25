@@ -239,6 +239,11 @@ class VideoMergeNode2(ComfyNodeABC):
                     video_width = material_info['width']  # 两个视频宽度相同
                     total_height = material_height + main_height
                     
+                    logger.info(f"  素材视频高度: {material_height}")
+                    logger.info(f"  主视频高度: {main_height}")
+                    logger.info(f"  合并后总高度: {total_height}")
+                    logger.info(f"  视频宽度: {video_width}")
+                    
                     # 计算合并后视频的总时长（使用主视频时长）
                     material_duration = material_info['duration']
                     main_duration = main_info['duration']
@@ -270,26 +275,40 @@ class VideoMergeNode2(ComfyNodeABC):
                     # 缩放GIF到与主视频相同的宽度
                     gif_scaled = gif_looped.filter('scale', video_width, gif_new_height)
                     
-                    # 计算GIF位置：在结合处居中显示
-                    # 由于位置关系固定：上方视频在上，下方视频在下
-                    # GIF的中心位置应该在结合处（上方视频的高度位置）
-                    # 根据实际的视频来源确定上方视频的高度
+                    # 计算GIF位置：中心与上下视频分割线重合
+                    # 关键：分割线位置 = 上方视频的高度
+                    # 根据实际的视频布局确定上方视频的高度
                     if is_main_from_upper:
-                        # 主视频在上方，素材视频在下方
-                        upper_height = main_height
+                        # 主视频来自上方文件夹，在上方；素材视频来自下方文件夹，在下方
+                        upper_video_height = main_height
+                        lower_video_height = material_height
+                        logger.info(f"  布局: 主视频在上方({main_height}px)，素材视频在下方({material_height}px)")
                     else:
-                        # 素材视频在上方，主视频在下方
-                        upper_height = material_height
+                        # 素材视频来自上方文件夹，在上方；主视频来自下方文件夹，在下方
+                        upper_video_height = material_height
+                        lower_video_height = main_height
+                        logger.info(f"  布局: 素材视频在上方({material_height}px)，主视频在下方({main_height}px)")
                     
-                    gif_center_y = upper_height
+                    # 分割线位置就是上方视频的高度
+                    seam_position = upper_video_height
                     
-                    # 叠加缩放后的GIF到视频上，使用shortest=1确保输出时长由主视频决定
-                    video_output = ffmpeg.filter([video_output, gif_scaled], 'overlay', 
-                                               x='(W-w)/2',  # 水平居中
-                                               y=f'{gif_center_y}-h/2',  # 垂直居中在结合处
-                                               shortest=1)  # 输出时长由最短的输入决定（主视频）
-                    logger.info(f"  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由主视频决定")
-                    logger.info(f"  GIF叠加位置: 水平居中，垂直位置在结合处 (y={gif_center_y})")
+                    # 使用比例计算确保精确对齐：y = H * (seam_position / total_height) - h/2
+                    seam_ratio = seam_position / total_height
+                    gif_y_expr = f'H*{seam_ratio:.10f} - h / 2'
+                    
+                    logger.info(f"  分割线位置: {seam_position}px (比例: {seam_ratio:.6f})")
+                    logger.info(f"  GIF缩放尺寸: {video_width}x{gif_new_height}")
+                    logger.info(f"  GIF位置表达式: {gif_y_expr}")
+
+                    video_output = ffmpeg.filter(
+                        [video_output, gif_scaled],
+                        'overlay',
+                        x='(W-w)/2',   # 水平居中
+                        y=gif_y_expr,   # GIF 中心与分割线重合（使用比例计算）
+                        shortest=1,
+                    )
+                    logger.info("  GIF循环播放设置: 使用loop filter实现无限循环，输出时长由主视频决定")
+                    logger.info(f"  GIF叠加位置: 水平居中，中心与分割线重合 (y={gif_y_expr})")
             
             # 根据音频模式处理音频
             if audio_mode == "mix":
