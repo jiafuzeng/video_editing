@@ -422,6 +422,50 @@ def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
         logger.error(f"导出保留区间时发生错误: {str(e)}")
         return []
 
+
+def split_folder_videos_to_1s_clips(input_dir: str) -> str:
+    """将文件夹内所有视频按 1s 切分到一个新的临时目录，返回该目录路径。
+    - 不修改原目录内容
+    - 生成的片段命名包含源文件名避免冲突
+    """
+    clip_dir = tempfile.mkdtemp(prefix="clip_1s_")
+    logger.info(f"创建1s片段临时目录: {clip_dir}")
+
+    video_exts = ('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v')
+    for name in os.listdir(input_dir):
+        src = os.path.join(input_dir, name)
+        if not os.path.isfile(src):
+            continue
+        if not name.lower().endswith(video_exts):
+            continue
+
+        base, ext = os.path.splitext(os.path.basename(src))
+        out_pattern = os.path.join(clip_dir, f"{base}_%05d{ext}")
+        try:
+            (
+                ffmpeg
+                .input(src)
+                .output(
+                    out_pattern,
+                    f='segment',
+                    segment_time=1,
+                    reset_timestamps=1,
+                    vcodec='libx264',
+                    acodec='aac',
+                    movflags='faststart',
+                    video_bitrate='3000k',
+                    audio_bitrate='192k',
+                    vsync='vfr'
+                )
+                .overwrite_output()
+                .run(quiet=True)
+            )
+            logger.info(f"切分完成: {name}")
+        except Exception as e:
+            logger.error(f"切分失败 {name}: {str(e)}")
+
+    return clip_dir
+
 # --- Step3: 匹配视频片段 ---
 def match_video(query_hashes, target_hashes, threshold=5):
     """找到所有匹配的视频片段"""
@@ -697,11 +741,15 @@ class VideoHashCutNode(ComfyNodeABC):
                 return ("",)
             logger.info(f"处理视频片段文件夹: {clip_dir}")
             
+            # 在线程外先将片段切分为1秒小段，传入线程使用
+            clip_1s_dir = split_folder_videos_to_1s_clips(clip_dir)
+            logger.info(f"1秒片段目录: {clip_1s_dir}")
+            
             # 获取视频片段文件（支持多种格式）
-            clip_files = get_video_files(clip_dir)
+            clip_files = get_video_files(clip_1s_dir)
             
             if not clip_files:
-                logger.error(f"视频片段文件夹 {video_clip_path} 中没有找到视频文件")
+                logger.error(f"视频片段文件夹 {clip_1s_dir} 中没有找到视频文件")
                 return ("",)
             
             # 准备任务列表 - 为录播视频文件夹中的每个文件创建处理任务
@@ -710,7 +758,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 # 构建任务参数：每个录播视频文件与片段文件夹进行匹配
                 task_params = {
                     'recording_file': os.path.join(recording_video_path, re_file),  # 单个录播视频文件路径
-                    'clip_dir': clip_dir,                                          # 视频片段文件夹路径
+                    'clip_dir': clip_1s_dir,                                       # 1秒片段文件夹路径
                     'match_threshold': match_threshold,                            # 视频匹配阈值
                     'min_gap_seconds': min_gap_seconds,                           # 匹配结果间最小间隔
                     'merge_gap_seconds': merge_gap_seconds,                        # 合并片段的最大间隔
@@ -731,35 +779,44 @@ class VideoHashCutNode(ComfyNodeABC):
             # 使用线程池执行任务
             results = []
             logger.info(f"启动线程池，最大工作线程数: {max_workers}")
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 提交所有任务
-                future_to_task = {
-                    executor.submit(self.process_single_video_with_params, task): task 
-                    for task in tasks
-                }
-                
-                logger.info(f"已提交 {len(future_to_task)} 个任务到线程池")
-                
-                # 收集结果
-                completed_count = 0
-                logger.info("开始等待任务完成...")
-                for future in as_completed(future_to_task):
-                    completed_count += 1
-                    task = future_to_task[future]
-                    game_name = os.path.basename(task['recording_file'])
+            try:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # 提交所有任务
+                    future_to_task = {
+                        executor.submit(self.process_single_video_with_params, task): task 
+                        for task in tasks
+                    }
                     
-                    try:
-                        result = future.result()
-                        if result:
-                            results.append(result)
+                    logger.info(f"已提交 {len(future_to_task)} 个任务到线程池")
+                    
+                    # 收集结果
+                    completed_count = 0
+                    logger.info("开始等待任务完成...")
+                    for future in as_completed(future_to_task):
+                        completed_count += 1
+                        task = future_to_task[future]
+                        game_name = os.path.basename(task['recording_file'])
+                        
+                        try:
+                            result = future.result()
+                            if result:
+                                results.append(result)
+                                with lock:
+                                    logger.info(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成")
+                            else:
+                                with lock:
+                                    logger.warning(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理失败")
+                        except Exception as e:
                             with lock:
-                                logger.info(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成")
-                        else:
-                            with lock:
-                                logger.warning(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理失败")
-                    except Exception as e:
-                        with lock:
-                            logger.error(f"[进度 {completed_count}/{len(tasks)}] {game_name} 异常: {str(e)}")
+                                logger.error(f"[进度 {completed_count}/{len(tasks)}] {game_name} 异常: {str(e)}")
+            finally:
+                # 线程结束后删除1秒片段目录
+                try:
+                    if clip_1s_dir and os.path.exists(clip_1s_dir):
+                        cleanup_temp_folder(clip_1s_dir)
+                        logger.info(f"已删除1秒片段目录: {clip_1s_dir}")
+                except Exception as e:
+                    logger.warning(f"删除1秒片段目录失败: {str(e)}")
 
             return (output_dir,)
             
@@ -781,7 +838,7 @@ class VideoHashCutNode(ComfyNodeABC):
         """
         # 从字典中提取参数
         recording_file = task_params['recording_file']      # 录播视频文件路径
-        clip_dir = task_params['clip_dir']                  # 片段视频文件夹路径
+        clip_1s_dir = task_params['clip_1s_dir']            # 1秒片段视频文件夹路径
         match_threshold = task_params['match_threshold']    # 视频匹配阈值
         min_gap_seconds = task_params['min_gap_seconds']    # 匹配结果间最小间隔
         merge_gap_seconds = task_params['merge_gap_seconds'] # 合并片段的最大间隔
@@ -792,9 +849,10 @@ class VideoHashCutNode(ComfyNodeABC):
             # 步骤0：统一视频分辨率
             logger.info("开始统一视频分辨率...")
             temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
-                recording_file, clip_dir, target_resolution=None  # 自动检测录播视频分辨率
+                recording_file, clip_1s_dir, target_resolution=None  # 自动检测录播视频分辨率
             )
             
+
             # 步骤1：计算录播视频的感知哈希和时间戳
             target_hashes, ts_target = video_to_phash(temp_recording_file)
             
@@ -802,9 +860,9 @@ class VideoHashCutNode(ComfyNodeABC):
             all_segments = []
 
             # 步骤2：遍历片段文件夹中的所有视频文件
-            for clip_file in os.listdir(temp_clip_dir):
+            for clip_file in os.listdir(clip_1s_dir):
                 # 构建片段视频的完整路径
-                clip_file_path = os.path.join(temp_clip_dir, clip_file)
+                clip_file_path = os.path.join(clip_1s_dir, clip_file)
                 
                 # 步骤3：计算片段视频的感知哈希
                 clip_file_hashes, _ = video_to_phash(clip_file_path)
@@ -826,7 +884,7 @@ class VideoHashCutNode(ComfyNodeABC):
             segments_for_remove = [(s["start"], s["end"]) for s in all_segments if isinstance(s, dict) and "start" in s and "end" in s]
             exported_files = export_keep_ranges_as_files(recording_file, segments_for_remove, output_dir)
             
-            # 清理临时文件夹
+            # 清理 normalize 产生的临时文件夹
             if temp_dir:
                 cleanup_temp_folder(temp_dir)
             
@@ -848,6 +906,7 @@ class VideoHashCutNode(ComfyNodeABC):
             # 确保在异常情况下也清理临时文件夹
             if temp_dir:
                 cleanup_temp_folder(temp_dir)
+            # clip_1s_dir 已在主线程 finally 中清理，无需重复
             return None
 
 
