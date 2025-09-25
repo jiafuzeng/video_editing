@@ -860,9 +860,9 @@ class VideoHashCutNode(ComfyNodeABC):
             all_segments = []
 
             # 步骤2：遍历片段文件夹中的所有视频文件
-            for clip_file in os.listdir(clip_1s_dir):
+            for clip_file in os.listdir(temp_clip_dir):
                 # 构建片段视频的完整路径
-                clip_file_path = os.path.join(clip_1s_dir, clip_file)
+                clip_file_path = os.path.join(temp_clip_dir, clip_file)
                 
                 # 步骤3：计算片段视频的感知哈希
                 clip_file_hashes, _ = video_to_phash(clip_file_path)
