@@ -637,7 +637,7 @@ class VideoMergeNode(ComfyNodeABC):
 
             processed_count = 0
             # 降低并发数避免资源竞争，特别是ffmpeg进程冲突
-            max_workers = min(4, max(1, os.cpu_count() - 2 or 2))
+            max_workers = max(4, max(1, os.cpu_count() - 2 or 2))
             logger.info(f"使用 {max_workers} 个线程并发处理 {len(tasks)} 个任务")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_task = {executor.submit(process_task, t): t for t in tasks}

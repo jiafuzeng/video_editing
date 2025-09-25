@@ -132,7 +132,7 @@ class VideoCropNode(ComfyNodeABC):
 
                 # 线程池并发处理
                 processed_count = 0
-                max_workers = min(8, max(1, os.cpu_count() - 2 or 1))
+                max_workers = max(8, max(1, os.cpu_count() - 2 or 1))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_file = {executor.submit(process_one, vf): vf for vf in candidates}
                     for future in as_completed(future_to_file):

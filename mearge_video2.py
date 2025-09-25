@@ -558,7 +558,7 @@ class VideoMergeNode2(ComfyNodeABC):
             output_paths = []
             
             # 设置线程池大小，减少资源争用
-            max_workers = min(4, max(1, os.cpu_count() - 2 or 2))
+            max_workers = max(4, max(1, os.cpu_count() - 2 or 2))
             logger.info(f"使用 {max_workers} 个线程并发处理 {len(tasks)} 个任务")
             
             def process_task(task):

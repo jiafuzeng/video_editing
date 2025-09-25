@@ -9,9 +9,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import glob
 import folder_paths
+import logging
 from pathlib import Path
 import tempfile
 import shutil
+from .utils import resolve_path, generate_unique_folder_name
+
+logger = logging.getLogger(__name__)
 
 # 支持的视频格式
 SUPPORTED_VIDEO_FORMATS = ["*.mp4", "*.avi", "*.mov", "*.mkv", "*.wmv", "*.flv", "*.webm", "*.m4v"]
@@ -46,7 +50,7 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
     temp_clip_dir = os.path.join(temp_dir, "clips")
     os.makedirs(temp_clip_dir, exist_ok=True)
     
-    print(f"创建临时文件夹: {temp_dir}")
+    logger.info(f"创建临时文件夹: {temp_dir}")
     
     try:
         # 0. 自动检测录播视频分辨率（如果未指定目标分辨率）
@@ -54,22 +58,22 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
             recording_resolution = get_video_resolution(recording_file)
             if recording_resolution:
                 target_resolution = recording_resolution
-                print(f"自动检测到录播视频分辨率: {target_resolution[0]}x{target_resolution[1]}")
+                logger.info(f"自动检测到录播视频分辨率: {target_resolution[0]}x{target_resolution[1]}")
             else:
                 target_resolution = (1920, 1080)
-                print(f"无法检测录播视频分辨率，使用默认分辨率: {target_resolution[0]}x{target_resolution[1]}")
+                logger.warning(f"无法检测录播视频分辨率，使用默认分辨率: {target_resolution[0]}x{target_resolution[1]}")
         else:
-            print(f"使用指定分辨率: {target_resolution[0]}x{target_resolution[1]}")
+            logger.info(f"使用指定分辨率: {target_resolution[0]}x{target_resolution[1]}")
         
         # 1. 处理录播视频
-        print(f"正在统一录播视频分辨率: {recording_file}")
+        logger.info(f"正在统一录播视频分辨率: {recording_file}")
         recording_basename = os.path.basename(recording_file)
         temp_recording_file = os.path.join(temp_dir, recording_basename)
         
         # 检查录播视频是否需要转换分辨率
         recording_resolution = get_video_resolution(recording_file)
         if recording_resolution and recording_resolution == target_resolution:
-            print("录播视频分辨率已匹配，创建软连接")
+            logger.info("录播视频分辨率已匹配，创建软连接")
             os.symlink(recording_file, temp_recording_file)
         else:
             # 使用ffmpeg统一录播视频分辨率
@@ -81,10 +85,10 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
                 .overwrite_output()
                 .run(quiet=True)
             )
-        print(f"录播视频分辨率已统一: {temp_recording_file}")
+        logger.info(f"录播视频分辨率已统一: {temp_recording_file}")
         
         # 2. 处理片段文件夹中的所有视频
-        print(f"正在统一片段文件夹中视频的分辨率: {clip_dir}")
+        logger.info(f"正在统一片段文件夹中视频的分辨率: {clip_dir}")
         processed_clips = []
         
         for clip_file in os.listdir(clip_dir):
@@ -96,7 +100,7 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
                     # 检查片段视频是否需要转换分辨率
                     clip_resolution = get_video_resolution(clip_file_path)
                     if clip_resolution and clip_resolution == target_resolution:
-                        print(f"片段视频 {clip_file} 分辨率已匹配，创建软连接")
+                        logger.info(f"片段视频 {clip_file} 分辨率已匹配，创建软连接")
                         os.symlink(clip_file_path, temp_clip_file)
                     else:
                         # 使用ffmpeg统一片段视频分辨率
@@ -108,11 +112,11 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
                             .overwrite_output()
                             .run(quiet=True)
                         )
-                        print(f"片段视频分辨率已统一: {clip_file}")
+                        logger.info(f"片段视频分辨率已统一: {clip_file}")
                     
                     processed_clips.append(temp_clip_file)
                 except Exception as e:
-                    print(f"处理片段视频 {clip_file} 时出错: {str(e)}")
+                    logger.error(f"处理片段视频 {clip_file} 时出错: {str(e)}")
                     # 如果处理失败，创建软连接
                     try:
                         os.symlink(clip_file_path, temp_clip_file)
@@ -121,11 +125,11 @@ def normalize_video_resolution(recording_file, clip_dir, target_resolution=None)
                         shutil.copy2(clip_file_path, temp_clip_file)
                     processed_clips.append(temp_clip_file)
         
-        print(f"分辨率统一完成，共处理 {len(processed_clips)} 个片段视频")
+        logger.info(f"分辨率统一完成，共处理 {len(processed_clips)} 个片段视频")
         return temp_recording_file, temp_clip_dir, temp_dir
         
     except Exception as e:
-        print(f"统一视频分辨率时发生错误: {str(e)}")
+        logger.error(f"统一视频分辨率时发生错误: {str(e)}")
         # 清理临时文件夹
         cleanup_temp_folder(temp_dir)
         raise e
@@ -140,9 +144,9 @@ def cleanup_temp_folder(temp_dir):
     try:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-            print(f"临时文件夹已清理: {temp_dir}")
+            logger.info(f"临时文件夹已清理: {temp_dir}")
     except Exception as e:
-        print(f"清理临时文件夹时出错: {str(e)}")
+        logger.error(f"清理临时文件夹时出错: {str(e)}")
 
 def get_video_resolution(video_file):
     """
@@ -164,7 +168,7 @@ def get_video_resolution(video_file):
         else:
             return None
     except Exception as e:
-        print(f"获取视频分辨率时出错: {str(e)}")
+        logger.error(f"获取视频分辨率时出错: {str(e)}")
         return None
 
 # 使用示例：
@@ -586,17 +590,17 @@ class VideoHashCutNode(ComfyNodeABC):
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "input_folder": (cls.get_input_folders(), {
-                    "default": "input",
-                    "tooltip": "选择输入视频文件夹"
-                }),
-                "video_clip_path": (cls.get_target_folders(), {
+                "input_folder": ("STRING", {
                     "default": "",
-                    "tooltip": "选择需要删除的视频片段文件夹"
+                    "tooltip": "录播视频目录路径（支持绝对路径或相对 input/ 的路径）"
                 }),
-                "output_folder_name": ("STRING", {
+                "video_clip_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "待删除片段目录路径（支持绝对路径或相对 input/ 的路径）"
+                }),
+                "output_prefix": ("STRING", {
                     "default": "hash_cut_output",
-                    "tooltip": "输出文件夹名称"
+                    "tooltip": "输出目录前缀（将自动创建唯一目录）"
                 }),
                 "match_threshold": ("FLOAT", {
                     "default": 7.0,
@@ -613,16 +617,6 @@ class VideoHashCutNode(ComfyNodeABC):
                     "tooltip": "最大线程数"
                 })
             },
-            "optional": {
-                "custom_input_path": ("STRING", {
-                    "default": "",
-                    "tooltip": "自定义输入路径（优先级高于下拉选择）"
-                }),
-                "custom_clip_path": ("STRING", {
-                    "default": "",
-                    "tooltip": "自定义视频片段路径（优先级高于下拉选择）"
-                })
-            }
         }
     
     RETURN_TYPES = ("STRING",)
@@ -630,7 +624,7 @@ class VideoHashCutNode(ComfyNodeABC):
     FUNCTION = "execute"
     CATEGORY = "video_editing"
     
-    def execute(self, input_folder, output_folder_name, match_threshold, max_workers, video_clip_path, custom_input_path="", custom_clip_path=""):
+    def execute(self, input_folder, output_prefix, match_threshold, max_workers, video_clip_path):
         """
         执行视频静止片段检测与移除
         """
@@ -638,49 +632,38 @@ class VideoHashCutNode(ComfyNodeABC):
         min_gap_seconds = 5.0          # 匹配结果间最小间隔（秒），避免过于频繁的片段分割
         merge_gap_seconds = 1.0         # 合并片段的最大间隔（秒），小于此间隔的片段会被合并
         # 注意：已移除静止片段检测相关参数，简化处理流程
-        
         try:
-            
-            # 解析录播视频路径
-            if custom_input_path and os.path.exists(custom_input_path):
-                recording_video_path = custom_input_path
-            else:
-                recording_video_path = folder_paths.get_input_directory()
-                recording_video_path = os.path.join(recording_video_path, input_folder)
+            # 解析录播视频路径（使用utils封装）
+            if not input_folder:
+                logger.error("请输入录播视频目录路径")
+                return ("",)
+            recording_video_path = resolve_path(input_folder)
             
             if not os.path.exists(recording_video_path):
-                print(f"录播视频文件夹不存在: {recording_video_path}")
+                logger.error(f"录播视频文件夹不存在: {recording_video_path}")
                 return ("",)
             
-            # 创建输出目录
-            output_dir = folder_paths.get_output_directory()
-            output_dir = os.path.join(output_dir, output_folder_name)
+            # 创建输出目录（使用前缀自动生成唯一目录）
+            output_root = folder_paths.get_output_directory()
+            unique_name = generate_unique_folder_name(output_prefix, output_root)
+            output_dir = os.path.join(output_root, unique_name)
             os.makedirs(output_dir, exist_ok=True)
             
-            # 解析视频片段路径（支持自定义路径）
-            if custom_clip_path and os.path.exists(custom_clip_path):
-                clip_dir = custom_clip_path
-                print(f"使用自定义视频片段路径: {clip_dir}")
-            else:
-                # 检查视频片段路径是否指定
-                if not video_clip_path:
-                    print("请选择需要删除的视频片段文件夹")
-                    return ("",)
-                
-                # 构建视频片段文件夹路径
-                input_dir = folder_paths.get_input_directory()
-                clip_dir = os.path.join(input_dir, video_clip_path)
-                if not os.path.exists(clip_dir):
-                    print(f"视频片段文件夹不存在: {clip_dir}")
-                    return ("",)
-                
-                print(f"处理视频片段文件夹: {video_clip_path}")
+            # 解析视频片段路径（使用utils封装）
+            if not video_clip_path:
+                logger.error("请输入需要删除的片段目录路径")
+                return ("",)
+            clip_dir = resolve_path(video_clip_path)
+            if not os.path.exists(clip_dir):
+                logger.error(f"视频片段文件夹不存在: {clip_dir}")
+                return ("",)
+            logger.info(f"处理视频片段文件夹: {clip_dir}")
             
             # 获取视频片段文件（支持多种格式）
             clip_files = get_video_files(clip_dir)
             
             if not clip_files:
-                print(f"视频片段文件夹 {video_clip_path} 中没有找到视频文件")
+                logger.error(f"视频片段文件夹 {video_clip_path} 中没有找到视频文件")
                 return ("",)
             
             # 准备任务列表 - 为录播视频文件夹中的每个文件创建处理任务
@@ -696,20 +679,20 @@ class VideoHashCutNode(ComfyNodeABC):
                     'output_dir': output_dir                                      # 输出文件夹路径
                 }
                 tasks.append(task_params)
-                print(f"  添加任务: {video_clip_path} -> {os.path.basename(re_file)}")
+                logger.info(f"  添加任务: {video_clip_path} -> {os.path.basename(re_file)}")
             
             if not tasks:
-                print("没有找到有效的处理任务")
+                logger.error("没有找到有效的处理任务")
                 return ("",)
             
-            print(f"准备处理 {len(tasks)} 个任务")
+            logger.info(f"准备处理 {len(tasks)} 个任务")
             
             # 创建线程锁用于输出同步
             lock = threading.Lock()
             
             # 使用线程池执行任务
             results = []
-            print(f"启动线程池，最大工作线程数: {max_workers}")
+            logger.info(f"启动线程池，最大工作线程数: {max_workers}")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务
                 future_to_task = {
@@ -717,11 +700,11 @@ class VideoHashCutNode(ComfyNodeABC):
                     for task in tasks
                 }
                 
-                print(f"已提交 {len(future_to_task)} 个任务到线程池")
+                logger.info(f"已提交 {len(future_to_task)} 个任务到线程池")
                 
                 # 收集结果
                 completed_count = 0
-                print("开始等待任务完成...")
+                logger.info("开始等待任务完成...")
                 for future in as_completed(future_to_task):
                     completed_count += 1
                     task = future_to_task[future]
@@ -732,18 +715,18 @@ class VideoHashCutNode(ComfyNodeABC):
                         if result:
                             results.append(result)
                             with lock:
-                                print(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成")
+                                logger.info(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成")
                         else:
                             with lock:
-                                print(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理失败")
+                                logger.warning(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理失败")
                     except Exception as e:
                         with lock:
-                            print(f"[进度 {completed_count}/{len(tasks)}] {game_name} 异常: {str(e)}")
+                            logger.error(f"[进度 {completed_count}/{len(tasks)}] {game_name} 异常: {str(e)}")
 
             return (output_dir,)
             
         except Exception as e:
-            print(f"处理视频时发生错误: {str(e)}")
+            logger.error(f"处理视频时发生错误: {str(e)}")
             return ("",)
     
     def process_single_video_with_params(self, task_params):
@@ -769,7 +752,7 @@ class VideoHashCutNode(ComfyNodeABC):
         temp_dir = None
         try:
             # 步骤0：统一视频分辨率
-            print("开始统一视频分辨率...")
+            logger.info("开始统一视频分辨率...")
             temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
                 recording_file, clip_dir, target_resolution=None  # 自动检测录播视频分辨率
             )
@@ -799,7 +782,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 
                 # 将当前片段的时间片段添加到总列表中
                 all_segments.extend(segments)
-                print(f"片段 {clip_file} 检测到 {len(segments)} 个匹配位置")
+                logger.info(f"片段 {clip_file} 检测到 {len(segments)} 个匹配位置")
             
             # 合并相邻片段并导出视频
             results = merge_segments(all_segments, merge_gap_seconds)
@@ -824,7 +807,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 }
             
         except Exception as e:
-            print(f"处理视频时发生错误: {str(e)}")
+            logger.error(f"处理视频时发生错误: {str(e)}")
             # 确保在异常情况下也清理临时文件夹
             if temp_dir:
                 cleanup_temp_folder(temp_dir)
@@ -840,4 +823,3 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoHashCutNode": "Video Hash Cut"
 }
-
