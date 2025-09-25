@@ -1,6 +1,7 @@
 import os
 import glob
 from pathlib import Path
+import logging as logger
 import ffmpeg
 import folder_paths
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict
@@ -44,11 +45,14 @@ class VideoCropNode(ComfyNodeABC):
             crop_x2, crop_y2: 右下角坐标
         """
         try:
+            logger.info(f"[VideoCropNode] 开始裁切 | input_folder={input_folder} | output_prefix={output_folder_prefix} | 区域=({crop_x1},{crop_y1})-({crop_x2},{crop_y2})")
             # 解析输入路径（支持相对路径和绝对路径）
             input_folder_path = resolve_path(input_folder)
+            logger.info(f"[VideoCropNode] 解析后的输入路径: {input_folder_path}")
             
             # 验证输入路径是否存在
             if not os.path.exists(input_folder_path):
+                logger.warning(f"[VideoCropNode] 输入路径不存在，终止: {input_folder_path}")
                 return ("",)
             
             # 创建输出目录
@@ -56,9 +60,11 @@ class VideoCropNode(ComfyNodeABC):
             unique_folder_name = generate_unique_folder_name(output_folder_prefix, output_dir)
             output_path = os.path.join(output_dir, unique_folder_name)
             os.makedirs(output_path, exist_ok=True)
+            logger.info(f"[VideoCropNode] 输出目录已创建/存在: {output_path}")
             
             # 创建包含清理后文件名的临时文件夹
             temp_dir, filename_mapping = create_sanitized_temp_folder(input_folder_path)
+            logger.info(f"[VideoCropNode] 临时目录创建完成: {temp_dir} | 规范化文件数: {len(filename_mapping)}")
             
             try:
                 # 支持的视频格式
@@ -75,10 +81,12 @@ class VideoCropNode(ComfyNodeABC):
                             # 获取文件名（不含扩展名）
                             filename = Path(video_file).stem
                             output_file = os.path.join(output_path, f"{filename}_cropped.mp4")
+                            logger.info(f"[VideoCropNode] 处理: {video_file} -> {output_file}")
                             
                             # 计算裁切宽度和高度
                             crop_width = crop_x2 - crop_x1
                             crop_height = crop_y2 - crop_y1
+                            logger.info(f"[VideoCropNode] 裁切参数: width={crop_width}, height={crop_height}, x1={crop_x1}, y1={crop_y1}")
                             
                             # 检查原视频是否有音效
                             has_audio = False
@@ -86,8 +94,10 @@ class VideoCropNode(ComfyNodeABC):
                                 probe = ffmpeg.probe(video_file)
                                 audio_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'audio']
                                 has_audio = len(audio_streams) > 0
+                                logger.info(f"[VideoCropNode] 音频检测: {'有音频' if has_audio else '无音频'}")
                             except Exception:
                                 has_audio = False
+                                logger.warning("[VideoCropNode] 音频检测失败，按无音频处理")
                             
                             # 使用ffmpeg进行裁切
                             if has_audio:
@@ -104,6 +114,7 @@ class VideoCropNode(ComfyNodeABC):
                                     .overwrite_output()
                                     .run(quiet=True)
                                 )
+                                logger.info("[VideoCropNode] 完成裁切并保留音频")
                             else:
                                 # 不保留音效的裁切
                                 (
@@ -115,23 +126,30 @@ class VideoCropNode(ComfyNodeABC):
                                     .overwrite_output()
                                     .run(quiet=True)
                                 )
+                                logger.info("[VideoCropNode] 完成裁切（无音频输出）")
                             
                             processed_count += 1
+                            logger.info(f"[VideoCropNode] 成功: {output_file}")
                             
                         except Exception as e:
+                            logger.error(f"[VideoCropNode] 处理失败: {video_file} | 错误: {e}")
                             continue
                 
                 if processed_count == 0:
+                    logger.warning("[VideoCropNode] 未处理任何视频文件")
                     return ("",)  # 没有可处理的视频时返回空字符串
                 else:
+                    logger.info(f"[VideoCropNode] 处理完成，共输出 {processed_count} 个文件 | 输出目录: {output_path}")
                     return (output_path,)
                     
             finally:
                 # 清理临时文件夹
+                logger.info(f"[VideoCropNode] 清理临时目录: {temp_dir}")
                 cleanup_temp_folder(temp_dir)
                 
         except ValueError as e:
             # 输入验证错误
+            logger.error(f"[VideoCropNode] 输入参数错误: {e}")
             return ("",)
 
 class VideoPreviewNode(ComfyNodeABC):
