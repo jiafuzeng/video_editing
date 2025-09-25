@@ -370,7 +370,7 @@ class AudioMergerNode:
     FUNCTION = "merge_audio"
     CATEGORY = "video_editing/audio"
     
-    def merge_audio(self, video_folder, audio_folder, video_prefix, video_volume, audio_volume, max_workers=10):
+    def merge_audio(self, video_folder, audio_folder, video_prefix, video_volume, audio_volume, max_workers = min(8, max(1, os.cpu_count() - 2 or 1))):
         """执行音频合并"""
         try:
             # 验证输入
