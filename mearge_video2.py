@@ -144,6 +144,17 @@ class VideoMergeNode2(ComfyNodeABC):
             original_width = video_info['width']
             original_height = video_info['height']
             
+            # 判断宽度是否已经相同，如果是则直接复制文件
+            if original_width == target_width:
+                logger.info(f"视频宽度已为目标宽度 {target_width}px，直接复制: {os.path.basename(input_path)}")
+                try:
+                    import shutil
+                    shutil.copy2(input_path, output_path)
+                    return True
+                except Exception as copy_err:
+                    logger.error(f"复制失败 {input_path} -> {output_path}: {copy_err}")
+                    return False
+            
             # 计算新的高度
             new_height = int((target_width * original_height) / original_width)
             
