@@ -385,9 +385,10 @@ def export_video_without_segments(video_path, segments, output_path):
         return False
 
 
-def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
+def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir, min_duration_seconds=None):
     """将删除区间反转为保留区间，并将每个保留区间单独导出为一个视频文件。
     segments_to_remove: [(start_sec, end_sec), ...]
+    min_duration_seconds: 最小保留时长，小于此时长的片段将被过滤掉
     返回: 导出成功的文件列表
     """
     try:
@@ -396,6 +397,18 @@ def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
         if not keep_ranges:
             logger.warning("没有可保留的区间，跳过导出")
             return []
+
+        # 过滤掉时长小于 min_duration_seconds 的保留片段
+        if min_duration_seconds is not None:
+            original_count = len(keep_ranges)
+            keep_ranges = [(start, end) for start, end in keep_ranges if (end - start) >= min_duration_seconds]
+            filtered_count = original_count - len(keep_ranges)
+            if filtered_count > 0:
+                logger.info(f"过滤掉 {filtered_count} 个时长小于 {min_duration_seconds}s 的保留片段")
+            
+            if not keep_ranges:
+                logger.warning(f"所有保留片段时长都小于 {min_duration_seconds}s，跳过导出")
+                return []
 
         exported_files = []
         base_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -1006,7 +1019,7 @@ class VideoHashCutNode(ComfyNodeABC):
             
             # 导出视频
             logger.info("开始导出处理后的视频...")
-            exported_files = export_keep_ranges_as_files(recording_file, segments_for_remove, output_dir)
+            exported_files = export_keep_ranges_as_files(recording_file, segments_for_remove, output_dir, merge_gap_seconds)
             logger.info(f"视频导出完成，生成 {len(exported_files)} 个文件")
             
             # 清理 normalize 产生的临时文件夹
