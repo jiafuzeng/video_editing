@@ -772,7 +772,7 @@ class VideoHashCutNode(ComfyNodeABC):
                 "max_workers": ("INT", {
                     "default": 4,
                     "min": 1,
-                    "max": 10,
+                    "max": 100,
                     "step": 1,
                     "tooltip": "最大线程数"
                 })
