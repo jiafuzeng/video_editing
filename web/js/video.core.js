@@ -388,33 +388,13 @@ function addVideoPreview(nodeType, isInput=true) {
             params.timestamp = Date.now()
             this.parentEl.hidden = this.value.hidden;
             
-            // 如果前端不存在 VHS 的路径小部件，视为 VHS 功能不可用（后端多半没有 /vhs 路由）
-            const hasVHS = !!(app.widgets && app.widgets.VHSPATH);
-            const useVHS = advp && hasVHS;
-
+            // 仅使用 /view 直链
             if (params.format?.split('/')[0] == 'video'
                 || advp && (params.format?.split('/')[1] == 'gif')
                 || params.format == 'folder') {
 
                 this.videoEl.autoplay = !this.value.paused && !this.value.hidden;
-                if (!useVHS) {
-                    this.videoEl.src = api.apiURL('/view?' + new URLSearchParams(params));
-                } else {
-                    let target_width = (previewNode.size[0]-20)*2 || 256;
-                    let minWidth = app.ui.settings.getSettingValue("VideoPreview.AdvancedPreviewsMinWidth")
-                    if (target_width < minWidth) {
-                        target_width = minWidth
-                    }
-                    if (!params.custom_width || !params.custom_height) {
-                        params.force_size = target_width+"x?"
-                    } else {
-                        let ar = params.custom_width/params.custom_height
-                        params.force_size = target_width+"x"+(target_width/ar)
-                    }
-                    params.deadline = app.ui.settings.getSettingValue("VideoPreview.AdvancedPreviewsDeadline")
-                    // 仅在 VHS 存在时使用 /vhs/viewvideo，否则回退到 /view
-                    this.videoEl.src = api.apiURL((useVHS ? '/vhs/viewvideo?' : '/view?') + new URLSearchParams(params));
-                }
+                this.videoEl.src = api.apiURL('/view?' + new URLSearchParams(params));
                 this.videoEl.hidden = false;
                 this.imgEl.hidden = true;
             } else if (params.format?.split('/')[0] == 'image'){
@@ -424,24 +404,7 @@ function addVideoPreview(nodeType, isInput=true) {
                 this.imgEl.hidden = false;
             }
             
-            delete previewNode.video_query
-            const doQuery = async () => {
-                if (!previewWidget?.value?.params?.filename) {
-                    return
-                }
-                // VHS 查询仅在 VHS 存在时执行，避免 404
-                if (!(app.widgets && app.widgets.VHSPATH)) return
-                let qurl = api.apiURL('/vhs/queryvideo?' + new URLSearchParams(previewWidget.value.params))
-                let query = undefined
-                try {
-                    let query_res = await fetch(qurl)
-                    query = await query_res.json()
-                } catch(e) {
-                    return
-                }
-                previewNode.video_query = query
-            }
-            doQuery()
+            // 不依赖 VHS 查询
         }
         
         previewWidget.callback = previewWidget.updateSource
@@ -578,7 +541,8 @@ function addVideoEditMenu(nodeType) {
                         filename = val.slice(i + 1);
                     }
                     const q = { filename, type: 'input', timestamp: Date.now() };
-                    if (subfolder) q.subfolder = subfolder;
+                    // 始终传递 subfolder（即使为空字符串），避免后端根目录慢路径解析
+                    q.subfolder = subfolder || '';
                     src = api.apiURL('/view?' + new URLSearchParams(q));
                 }
             }
@@ -1224,7 +1188,8 @@ app.registerExtension({
 
                     // 约定存储到 input 目录，可配合 /view? 访问
                     const params = { filename: filename, type: "input", format };
-                    if (subfolder) params.subfolder = subfolder;
+                    // 始终传递 subfolder（即使为空字符串），避免后端根目录慢路径解析
+                    params.subfolder = subfolder || "";
                     if (typeof this.updateParameters === "function") {
                         this.updateParameters(params, true);
                     }
@@ -1330,6 +1295,11 @@ app.registerExtension({
                     openBrowser();
                 });
                 browseBtn.options.serialize = false;
+
+                // 4) 如果初始就有值（例如加载工作流），自动触发一次回调以刷新预览
+                if (pathWidget?.value) {
+                    try { pathWidget.callback?.(pathWidget.value); } catch(_) {}
+                }
             });
 
         }
