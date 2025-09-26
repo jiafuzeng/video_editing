@@ -173,13 +173,10 @@ class VideoPreviewNode(ComfyNodeABC):
     @classmethod
     def INPUT_TYPES(cls) -> InputTypeDict:
         # 采用内置上传：列出 input 目录下的视频，并启用 video_upload
-        input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["video"]) or []
-        files = sorted(files)
         return {
             "required": {
-                "video_path": (files, {"video_upload": True, "tooltip": "选择或上传视频 (保存到 input 目录)"}),
+                # 允许任意字符串路径，避免“Value not in list”校验报错，前端会负责填写
+                "video_path": (IO.STRING, {"default": "", "tooltip": "选择或输入视频路径(支持子目录)，也可用前端浏览按钮"}),
             },
             "optional": {
                 # 这四个参数用于前端写入坐标（在前端被隐藏）

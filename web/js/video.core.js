@@ -1192,6 +1192,146 @@ app.registerExtension({
             // 右键“视频编辑”面板
             addVideoEditMenu(nodeType);
 
+            // 为 VideoPreviewNode 增加独立的动态路径选择能力（仅浏览选择，不含上传）
+            chainCallback(nodeType.prototype, "onNodeCreated", function() {
+                // 1) 确保存在路径选择组件（combo），名称固定为 video_path
+                let pathWidget = this.widgets?.find?.((w) => w.name === "video_path");
+                if (!pathWidget) {
+                    pathWidget = this.addWidget("combo", "video_path", "", () => {}, { values: [] });
+                } else if (!pathWidget.options) {
+                    pathWidget.options = { values: [] };
+                } else if (!Array.isArray(pathWidget.options.values)) {
+                    pathWidget.options.values = [];
+                }
+
+                // 2) 选择路径时，解析扩展名并设置预览参数，独立于其它项目实现
+                chainCallback(pathWidget, "callback", (value) => {
+                    if (!value) return;
+                    const full = String(value);
+                    // 拆分子目录与文件名，/view 需要分离的参数
+                    let filename = full;
+                    let subfolder = "";
+                    const slashIdx = full.lastIndexOf("/");
+                    if (slashIdx > 0) {
+                        subfolder = full.slice(0, slashIdx);
+                        filename = full.slice(slashIdx + 1);
+                    }
+                    const dotIdx = filename.lastIndexOf(".");
+                    const ext = dotIdx >= 0 ? filename.slice(dotIdx + 1).toLowerCase() : "";
+                    let major = "video";
+                    if (["gif", "webp", "avif"].includes(ext)) major = "image";
+                    const format = major + "/" + (ext || "octet-stream");
+
+                    // 约定存储到 input 目录，可配合 /view? 访问
+                    const params = { filename: filename, type: "input", format };
+                    if (subfolder) params.subfolder = subfolder;
+                    if (typeof this.updateParameters === "function") {
+                        this.updateParameters(params, true);
+                    }
+                });
+
+                // 3) 浏览服务器路径（依赖本项目新增 /list_dir 接口）
+                    const openBrowser = () => {
+                    const rootType = 'input';
+                    let current = '';
+
+                    const backdrop = document.createElement('div');
+                    Object.assign(backdrop.style, { position: 'fixed', left: '0', top: '0', width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.6)', zIndex: '100000', display: 'flex', alignItems: 'center', justifyContent: 'center' });
+                    const panel = document.createElement('div');
+                    Object.assign(panel.style, { width: '720px', maxWidth: '90vw', maxHeight: '80vh', background: '#111', color: '#ddd', borderRadius: '8px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', overflow: 'hidden', display: 'flex', flexDirection: 'column' });
+                    const header = document.createElement('div');
+                    Object.assign(header.style, { padding: '10px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #222' });
+                    const title = document.createElement('div');
+                    title.textContent = '浏览: ' + rootType + '/';
+                    const btns = document.createElement('div');
+                    const upBtn = document.createElement('button'); upBtn.textContent = '上一级'; upBtn.style.marginRight = '8px';
+                    const closeBtn = document.createElement('button'); closeBtn.textContent = '关闭';
+                    btns.appendChild(upBtn); btns.appendChild(closeBtn);
+                    header.appendChild(title); header.appendChild(btns);
+
+                    const list = document.createElement('div');
+                    Object.assign(list.style, { padding: '8px 12px', overflow: 'auto', flex: '1', fontSize: '13px', lineHeight: '22px' });
+
+                    const render = async () => {
+                        title.textContent = '浏览: ' + rootType + '/' + (current || '');
+                        // 注意：api.apiURL 会自动加 /api 前缀，这里不要再手动加 /api
+                        const url = api.apiURL('/list_dir?type=input&subfolder=' + encodeURIComponent(current));
+                        let data = { subfolders: [], files: [] };
+                        try {
+                            console.debug('[list_dir] 请求:', url);
+                            const resp = await fetch(url);
+                            if (!resp.ok) {
+                                console.warn('[list_dir] 非200响应:', resp.status, resp.statusText);
+                                list.innerHTML = '<div style="opacity:.8">加载失败: ' + resp.status + ' ' + resp.statusText + '</div>';
+                                return;
+                            }
+                            data = await resp.json();
+                        } catch(e) {
+                            console.error('[list_dir] 请求异常:', e);
+                            list.innerHTML = '<div style="opacity:.8">请求异常，详见控制台</div>';
+                            return;
+                        }
+                        list.innerHTML = '';
+
+                        const makeItem = (name, isDir) => {
+                            const row = document.createElement('div');
+                            row.textContent = (isDir ? '📁 ' : '📄 ') + name;
+                            row.style.cursor = 'pointer';
+                            row.style.padding = '2px 4px';
+                            row.onmouseenter = () => row.style.background = '#1a1a1a';
+                            row.onmouseleave = () => row.style.background = 'transparent';
+                            row.onclick = () => {
+                                if (isDir) {
+                                    current = (current ? current + '/' : '') + name;
+                                    render();
+                                } else {
+                                    // 写入到下拉框并触发预览
+                                    const val = (current ? current + '/' : '') + name;
+                                    if (!pathWidget.options.values.includes(val)) pathWidget.options.values.push(val);
+                                    pathWidget.value = val;
+                                    pathWidget.callback?.(val);
+                                    // 立刻请求重绘以显示所选路径
+                                    this.setDirtyCanvas?.(true);
+                                    cleanup();
+                                }
+                            };
+                            list.appendChild(row);
+                        };
+
+                        data.subfolders.forEach((n) => makeItem(n, true));
+                        data.files.forEach((n) => makeItem(n, false));
+                        if (data.subfolders.length === 0 && data.files.length === 0) {
+                            const empty = document.createElement('div');
+                            empty.textContent = '空目录';
+                            empty.style.opacity = '.8';
+                            list.appendChild(empty);
+                        }
+                    };
+
+                    const cleanup = () => { backdrop.remove(); };
+                    upBtn.onclick = () => {
+                        if (!current) return;
+                        const i = current.lastIndexOf('/');
+                        current = i > 0 ? current.slice(0, i) : '';
+                        render();
+                    };
+                    closeBtn.onclick = cleanup;
+
+                    panel.appendChild(header);
+                    panel.appendChild(list);
+                    backdrop.appendChild(panel);
+                    document.body.appendChild(backdrop);
+                    render();
+                };
+
+                const browseBtn = this.addWidget("button", "浏览服务器文件", "", () => {
+                    // 清除当前点击事件，避免 LiteGraph 抢焦点
+                    app.canvas.node_widget = null
+                    openBrowser();
+                });
+                browseBtn.options.serialize = false;
+            });
+
         }
     },
     
