@@ -626,6 +626,56 @@ function addVideoEditMenu(nodeType) {
             title.style.color = '#fff';
             title.style.fontSize = '14px';
             title.style.fontWeight = '600';
+            
+            // 控制面板
+            const controls = document.createElement('div');
+            controls.style.display = 'flex';
+            controls.style.alignItems = 'center';
+            controls.style.gap = '8px';
+            
+            // 全局选中复选框
+            const globalSelectLabel = document.createElement('label');
+            globalSelectLabel.style.color = '#fff';
+            globalSelectLabel.style.fontSize = '12px';
+            globalSelectLabel.style.display = 'flex';
+            globalSelectLabel.style.alignItems = 'center';
+            globalSelectLabel.style.gap = '4px';
+            globalSelectLabel.style.cursor = 'pointer';
+            
+            const globalSelectCheckbox = document.createElement('input');
+            globalSelectCheckbox.type = 'checkbox';
+            globalSelectCheckbox.style.margin = '0';
+            globalSelectCheckbox.style.cursor = 'pointer';
+            
+            const globalSelectText = document.createElement('span');
+            globalSelectText.textContent = '全局选中';
+            
+            globalSelectLabel.appendChild(globalSelectCheckbox);
+            globalSelectLabel.appendChild(globalSelectText);
+            
+            // 下拉框拖动开关
+            const dragSelectLabel = document.createElement('label');
+            dragSelectLabel.style.color = '#fff';
+            dragSelectLabel.style.fontSize = '12px';
+            dragSelectLabel.style.display = 'flex';
+            dragSelectLabel.style.alignItems = 'center';
+            dragSelectLabel.style.gap = '4px';
+            dragSelectLabel.style.cursor = 'pointer';
+            
+            const dragSelectCheckbox = document.createElement('input');
+            dragSelectCheckbox.type = 'checkbox';
+            dragSelectCheckbox.style.margin = '0';
+            dragSelectCheckbox.style.cursor = 'pointer';
+            
+            const dragSelectText = document.createElement('span');
+            dragSelectText.textContent = '下拉框拖动';
+            
+            dragSelectLabel.appendChild(dragSelectCheckbox);
+            dragSelectLabel.appendChild(dragSelectText);
+            
+            controls.appendChild(globalSelectLabel);
+            controls.appendChild(dragSelectLabel);
+            
             const btns = document.createElement('div');
             const closeBtn = document.createElement('button');
             closeBtn.textContent = '关闭';
@@ -634,7 +684,9 @@ function addVideoEditMenu(nodeType) {
             saveBtn.textContent = '保存';
             btns.appendChild(closeBtn);
             btns.appendChild(saveBtn);
+            
             header.appendChild(title);
+            header.appendChild(controls);
             header.appendChild(btns);
 
             // 视频容器
@@ -678,6 +730,9 @@ function addVideoEditMenu(nodeType) {
 
             let isDrawing = false;
             let overlayReady = false;
+            let isDragging = false; // 下拉框拖动状态
+            let dragStartPos = { x: 0, y: 0 }; // 拖动起始位置
+            let boxStartPos = { x: 0, y: 0 }; // 选择框起始位置
             // 显示坐标（overlay 内的像素）
             let startDX = 0; let startDY = 0; let currDX = 0; let currDY = 0;
             // 视频像素坐标（相对原视频分辨率）
@@ -700,52 +755,122 @@ function addVideoEditMenu(nodeType) {
                     return;
                 }
 
-                // 计算视频像素坐标（基于 overlay 内容矩形）
-                startVX = clamp((e.clientX - or.left) * vScaleX, 0, vW);
-                startVY = clamp((e.clientY - or.top)  * vScaleY, 0, vH);
-                currVX = startVX; currVY = startVY;
+                const clickX = e.clientX - or.left;
+                const clickY = e.clientY - or.top;
 
-                // 转换为覆盖层显示坐标
-                startDX = (startVX / vW) * or.width;
-                startDY = (startVY / vH) * or.height;
-                currDX = startDX; currDY = startDY;
+                // 检查是否点击在选择框内（下拉框拖动模式）
+                if (dragSelectCheckbox.checked && box.style.display !== 'none') {
+                    const boxRect = box.getBoundingClientRect();
+                    const overlayRect = overlay.getBoundingClientRect();
+                    const boxLeft = boxRect.left - overlayRect.left;
+                    const boxTop = boxRect.top - overlayRect.top;
+                    const boxRight = boxLeft + boxRect.width;
+                    const boxBottom = boxTop + boxRect.height;
+
+                    if (clickX >= boxLeft && clickX <= boxRight && clickY >= boxTop && clickY <= boxBottom) {
+                        // 开始拖动选择框
+                        isDragging = true;
+                        dragStartPos = { x: e.clientX, y: e.clientY };
+                        boxStartPos = { x: boxLeft, y: boxTop };
+                        box.style.cursor = 'move';
+                        return;
+                    }
+                }
+
+                // 全局选中模式：选择整个视频区域
+                if (globalSelectCheckbox.checked) {
+                    startVX = 0;
+                    startVY = 0;
+                    currVX = vW;
+                    currVY = vH;
+                    startDX = 0;
+                    startDY = 0;
+                    currDX = or.width;
+                    currDY = or.height;
+                } else {
+                    // 正常绘制模式
+                    // 计算视频像素坐标（基于 overlay 内容矩形）
+                    startVX = clamp(clickX * vScaleX, 0, vW);
+                    startVY = clamp(clickY * vScaleY, 0, vH);
+                    currVX = startVX; currVY = startVY;
+
+                    // 转换为覆盖层显示坐标
+                    startDX = (startVX / vW) * or.width;
+                    startDY = (startVY / vH) * or.height;
+                    currDX = startDX; currDY = startDY;
+                }
 
                 isDrawing = true;
                 box.style.display = 'block';
                 box.style.left = startDX + 'px';
                 box.style.top = startDY + 'px';
-                box.style.width = '0px';
-                box.style.height = '0px';
+                box.style.width = Math.abs(currDX - startDX) + 'px';
+                box.style.height = Math.abs(currDY - startDY) + 'px';
             };
             const onMove = (e) => {
-                if (!isDrawing) return;
+                if (!isDrawing && !isDragging) return;
                 const or = getORect();
                 const vW = Math.max(1, video.videoWidth || or.width);
                 const vH = Math.max(1, video.videoHeight || or.height);
                 const vScaleX = vW / Math.max(1, or.width);
                 const vScaleY = vH / Math.max(1, or.height);
 
-                // 当前视频像素坐标（基于 overlay 内容矩形）
-                const cx = clamp(e.clientX, or.left, or.right);
-                const cy = clamp(e.clientY, or.top, or.bottom);
-                currVX = clamp((cx - or.left) * vScaleX, 0, vW);
-                currVY = clamp((cy - or.top)  * vScaleY, 0, vH);
+                if (isDragging) {
+                    // 拖动选择框模式
+                    const deltaX = e.clientX - dragStartPos.x;
+                    const deltaY = e.clientY - dragStartPos.y;
+                    
+                    const newLeft = Math.max(0, Math.min(boxStartPos.x + deltaX, or.width - parseFloat(box.style.width)));
+                    const newTop = Math.max(0, Math.min(boxStartPos.y + deltaY, or.height - parseFloat(box.style.height)));
+                    
+                    box.style.left = newLeft + 'px';
+                    box.style.top = newTop + 'px';
+                    
+                    // 更新视频像素坐标
+                    startVX = clamp((newLeft / or.width) * vW, 0, vW);
+                    startVY = clamp((newTop / or.height) * vH, 0, vH);
+                    currVX = clamp(startVX + (parseFloat(box.style.width) / or.width) * vW, 0, vW);
+                    currVY = clamp(startVY + (parseFloat(box.style.height) / or.height) * vH, 0, vH);
+                    
+                    startDX = newLeft;
+                    startDY = newTop;
+                    currDX = newLeft + parseFloat(box.style.width);
+                    currDY = newTop + parseFloat(box.style.height);
+                } else if (isDrawing && !globalSelectCheckbox.checked) {
+                    // 正常绘制模式（非全局选中）
+                    // 当前视频像素坐标（基于 overlay 内容矩形）
+                    const cx = clamp(e.clientX, or.left, or.right);
+                    const cy = clamp(e.clientY, or.top, or.bottom);
+                    currVX = clamp((cx - or.left) * vScaleX, 0, vW);
+                    currVY = clamp((cy - or.top)  * vScaleY, 0, vH);
 
-                // 显示坐标
-                currDX = (currVX / vW) * or.width;
-                currDY = (currVY / vH) * or.height;
+                    // 显示坐标
+                    currDX = (currVX / vW) * or.width;
+                    currDY = (currVY / vH) * or.height;
 
-                const left = Math.min(startDX, currDX);
-                const top = Math.min(startDY, currDY);
-                const w = Math.abs(currDX - startDX);
-                const h = Math.abs(currDY - startDY);
-                box.style.left = left + 'px';
-                box.style.top = top + 'px';
-                box.style.width = w + 'px';
-                box.style.height = h + 'px';
+                    const left = Math.min(startDX, currDX);
+                    const top = Math.min(startDY, currDY);
+                    const w = Math.abs(currDX - startDX);
+                    const h = Math.abs(currDY - startDY);
+                    box.style.left = left + 'px';
+                    box.style.top = top + 'px';
+                    box.style.width = w + 'px';
+                    box.style.height = h + 'px';
+                }
+                // 全局选中模式下不需要更新，因为已经设置了完整区域
             };
-            const onUp = (e) => { if (isDrawing && e.button === 0) isDrawing = false; };
-            const onDbl = () => { box.style.display = 'none'; };
+            const onUp = (e) => { 
+                if (isDrawing && e.button === 0) isDrawing = false; 
+                if (isDragging && e.button === 0) {
+                    isDragging = false;
+                    box.style.cursor = 'crosshair';
+                }
+            };
+            const onDbl = () => { 
+                box.style.display = 'none'; 
+                isDragging = false;
+                box.style.cursor = 'crosshair';
+            };
 
             overlay.addEventListener('mousedown', onDown);
             window.addEventListener('mousemove', onMove);
@@ -1057,9 +1182,6 @@ app.registerExtension({
         if (nodeData?.name === "VideoCropNode") {
             // 添加视频预览功能
             addVideoPreview(nodeType, true);
-            
-            // 为输入文件夹添加文件夹上传功能
-            //addUploadWidget(nodeType, nodeData, "input_folder", "folder");
         }
         
         // 为视频预览节点添加预览功能
@@ -1088,6 +1210,7 @@ window.VHSCore = {
     addVideoPreview,
     addUploadWidget,
     addPreviewOptions,
+    addVideoEditMenu,
     chainCallback,
     fitHeight,
     allowDragFromWidget,
