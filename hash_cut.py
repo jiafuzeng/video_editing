@@ -400,10 +400,18 @@ def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
         exported_files = []
         base_name = os.path.splitext(os.path.basename(video_path))[0]
         ext = os.path.splitext(os.path.basename(video_path))[1]
+        
+        # 计算总保留时长
+        total_kept_duration = sum(end - start for start, end in keep_ranges)
+        logger.info(f"原始视频时长: {duration:.3f}s")
+        logger.info(f"总保留时长: {total_kept_duration:.3f}s")
+        logger.info(f"删除时长: {duration - total_kept_duration:.3f}s")
+        logger.info(f"保留比例: {(total_kept_duration / duration * 100):.1f}%")
 
         for idx, (start, end) in enumerate(keep_ranges, start=1):
             clip_name = f"{base_name}_kept_{idx:03d}{ext}"
             clip_path = os.path.join(output_dir, clip_name)
+            segment_duration = end - start
             try:
                 (
                     ffmpeg
@@ -413,7 +421,7 @@ def export_keep_ranges_as_files(video_path, segments_to_remove, output_dir):
                     .run(quiet=True)
                 )
                 exported_files.append(clip_path)
-                logger.info(f"导出保留片段: {clip_name} [{start:.3f}, {end:.3f}]")
+                logger.info(f"导出保留片段: {clip_name} [{start:.3f}s - {end:.3f}s] (时长: {segment_duration:.3f}s)")
             except Exception as e:
                 logger.error(f"导出片段失败 {clip_name}: {str(e)}")
 
@@ -464,6 +472,7 @@ def split_folder_videos_to_clips(input_dir: str, segment_seconds: float = 1.0) -
 
             else:
                 # 情况2：正常固定时长分割，最后一段允许为短尾
+                # 使用更温和的分割方式，避免黑屏问题
                 (
                     ffmpeg
                     .input(src)
@@ -477,7 +486,8 @@ def split_folder_videos_to_clips(input_dir: str, segment_seconds: float = 1.0) -
                         movflags='faststart',
                         video_bitrate='3000k',
                         audio_bitrate='192k',
-                        vsync='vfr'
+                        vsync='vfr',
+                        force_key_frames=f'expr:gte(t,n_forced*{seg})'
                     )
                     .overwrite_output()
                     .run(quiet=True)
@@ -765,10 +775,12 @@ class VideoHashCutNode(ComfyNodeABC):
         """
         执行视频静止片段检测与移除
         """
-        # 设置默认参数值（这些参数不在UI中显示，使用优化后的默认值）
-        min_gap_seconds = 5.0          # 匹配结果间最小间隔（秒），避免过于频繁的片段分割
-        merge_gap_seconds = 1.0         # 合并片段的最大间隔（秒），小于此间隔的片段会被合并
+        # 匹配结果间最小间隔（秒），避免过于频繁的片段分割
+        min_gap_seconds = 10.0
+        # 切分片段的时长（秒）
         segment_seconds = 1.0
+        # 合并片段的最大间隔（秒），小于此间隔的片段会被合并
+        merge_gap_seconds = 10.0
         # 注意：已移除静止片段检测相关参数，简化处理流程
         try:
             # 解析录播视频路径（使用utils封装）
@@ -798,18 +810,29 @@ class VideoHashCutNode(ComfyNodeABC):
             logger.info(f"处理视频片段文件夹: {clip_dir}")
             
             # 在线程外先将片段切分为固定时长小段，传入线程使用
+            logger.info(f"开始将片段切分为 {segment_seconds} 秒小段...")
             clip_seg_dir = split_folder_videos_to_clips(clip_dir, segment_seconds)
             logger.info(f"{segment_seconds}秒片段目录: {clip_seg_dir}")
             
+            # 检查切分结果
+            seg_files = [f for f in os.listdir(clip_seg_dir) if f.endswith('.mp4')]
+            logger.info(f"切分完成，共生成 {len(seg_files)} 个片段文件")
+            
             # 主线程：预计算片段哈希缓存
+            logger.info("开始预计算片段哈希缓存...")
             clip_hash_cache = precompute_clip_hashes(clip_seg_dir)
             if not clip_hash_cache:
                 logger.error(f"片段哈希缓存为空，目录: {clip_seg_dir}")
                 return ("",)
+            logger.info(f"片段哈希缓存计算完成，共 {len(clip_hash_cache)} 个片段")
             
             # 准备任务列表 - 为录播视频文件夹中的每个文件创建处理任务
+            logger.info("准备处理任务列表...")
             tasks = []
-            for re_file in os.listdir(recording_video_path):
+            recording_files = [f for f in os.listdir(recording_video_path) if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v'))]
+            logger.info(f"在录播视频目录中找到 {len(recording_files)} 个视频文件")
+            
+            for re_file in recording_files:
                 # 构建任务参数：每个录播视频文件与片段文件夹进行匹配
                 task_params = {
                     'recording_file': os.path.join(recording_video_path, re_file),  # 单个录播视频文件路径
@@ -821,13 +844,14 @@ class VideoHashCutNode(ComfyNodeABC):
                     'output_dir': output_dir                                          # 输出文件夹路径
                 }
                 tasks.append(task_params)
-                logger.info(f"  添加任务: {video_clip_path} -> {os.path.basename(re_file)}")
+                logger.info(f"  添加任务: {os.path.basename(re_file)} (匹配阈值: {match_threshold})")
             
             if not tasks:
                 logger.error("没有找到有效的处理任务")
                 return ("",)
             
-            logger.info(f"准备处理 {len(tasks)} 个任务")
+            logger.info(f"任务准备完成，共 {len(tasks)} 个处理任务")
+            logger.info(f"处理参数 - 匹配阈值: {match_threshold}, 最小间隔: {min_gap_seconds}s, 合并间隔: {merge_gap_seconds}s")
             
             # 创建线程锁用于输出同步
             lock = threading.Lock()
@@ -847,6 +871,8 @@ class VideoHashCutNode(ComfyNodeABC):
                     
                     # 收集结果
                     completed_count = 0
+                    successful_count = 0
+                    failed_count = 0
                     logger.info("开始等待任务完成...")
                     for future in as_completed(future_to_task):
                         completed_count += 1
@@ -857,14 +883,19 @@ class VideoHashCutNode(ComfyNodeABC):
                             result = future.result()
                             if result:
                                 results.append(result)
+                                successful_count += 1
                                 with lock:
-                                    logger.info(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成")
+                                    logger.info(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理完成 - 生成 {result.get('segments_count', 0)} 个片段")
                             else:
+                                failed_count += 1
                                 with lock:
                                     logger.warning(f"[进度 {completed_count}/{len(tasks)}] {game_name} 处理失败")
                         except Exception as e:
+                            failed_count += 1
                             with lock:
                                 logger.error(f"[进度 {completed_count}/{len(tasks)}] {game_name} 异常: {str(e)}")
+                    
+                    logger.info(f"所有任务完成 - 成功: {successful_count}, 失败: {failed_count}, 总计: {completed_count}")
             finally:
                 # 线程结束后删除1秒片段目录
                 try:
@@ -874,6 +905,17 @@ class VideoHashCutNode(ComfyNodeABC):
                 except Exception as e:
                     logger.warning(f"删除1秒片段目录失败: {str(e)}")
 
+            # 输出最终处理结果
+            logger.info(f"所有处理完成，输出目录: {output_dir}")
+            logger.info(f"成功处理 {len(results)} 个视频文件")
+            
+            # 计算总体统计信息
+            total_output_segments = sum(result.get('segments_count', 0) for result in results)
+            logger.info(f"总共生成 {total_output_segments} 个保留片段")
+            
+            for result in results:
+                logger.info(f"  - {result['game_name']}: {result['segments_count']} 个输出片段")
+            
             return (output_dir,)
             
         except Exception as e:
@@ -908,43 +950,79 @@ class VideoHashCutNode(ComfyNodeABC):
             temp_recording_file, temp_clip_dir, temp_dir = normalize_video_resolution(
                 recording_file, clip_1s_dir, target_resolution=None  # 自动检测录播视频分辨率
             )
+            logger.info(f"视频分辨率统一完成，临时录播文件: {temp_recording_file}")
+            logger.info(f"临时片段目录: {temp_clip_dir}")
+            
             # 步骤1：计算录播视频的感知哈希和时间戳
+            logger.info("开始计算录播视频的感知哈希...")
             target_hashes, ts_target = video_to_phash(temp_recording_file)
+            logger.info(f"录播视频哈希计算完成，共 {len(target_hashes)} 个哈希值")
             
             # 初始化所有片段的时间片段列表
             all_segments = []
 
             # 步骤2：遍历预计算的片段哈希进行匹配
+            logger.info(f"开始匹配 {len(clip_hash_cache)} 个片段...")
             for clip_file_path, clip_file_hashes in clip_hash_cache.items():
+                clip_name = os.path.basename(clip_file_path)
+                logger.info(f"正在处理片段: {clip_name} (哈希数量: {len(clip_file_hashes)})")
                 
                 # 步骤4：在录播视频中查找与片段视频匹配的位置
                 all_matches = match_video(clip_file_hashes, target_hashes, threshold=match_threshold)
+                logger.info(f"片段 {clip_name} 找到 {len(all_matches)} 个原始匹配")
                 
                 # 步骤5：过滤重叠的匹配结果，避免重复检测
                 matches = filter_overlapping_matches(all_matches, min_gap=min_gap_seconds)
+                logger.info(f"片段 {clip_name} 过滤后剩余 {len(matches)} 个匹配")
                 
                 # 步骤6：将匹配结果转换为时间片段
                 segments = build_segments(matches, ts_target, len(clip_file_hashes))
                 
                 # 将当前片段的时间片段添加到总列表中
                 all_segments.extend(segments)
-                logger.info(f"片段 {os.path.basename(clip_file_path)} 检测到 {len(segments)} 个匹配位置")
+                logger.info(f"片段 {clip_name} 检测到 {len(segments)} 个时间片段")
+                
+                # 输出每个片段的详细信息
+                for i, seg in enumerate(segments):
+                    logger.info(f"  片段 {clip_name} 第{i+1}个匹配: {seg['start']:.3f}s - {seg['end']:.3f}s (相似度: {seg['score']:.2f})")
             
-            # 不再合并，直接将“待删除区间”反转为保留区间，并逐段导出
-            segments_for_remove = [(s["start"], s["end"]) for s in all_segments if isinstance(s, dict) and "start" in s and "end" in s]
+            logger.info(f"所有片段匹配完成，共找到 {len(all_segments)} 个时间片段")
+            
+            # 过滤有效的片段
+            valid_segments = [s for s in all_segments if isinstance(s, dict) and "start" in s and "end" in s]
+            logger.info(f"准备删除的时间片段数量: {len(valid_segments)}")
+            
+            # 合并片段
+            logger.info(f"开始合并相邻片段，合并间隔: {merge_gap_seconds}s")
+            merged_segments = merge_segments(valid_segments, merge_gap_seconds)
+            logger.info(f"合并后需要删除的时间片段数量: {len(merged_segments)}")
+            
+            # 输出合并后的片段信息
+            for i, seg in enumerate(merged_segments):
+                logger.info(f"  删除片段 {i+1}: {seg['start']:.3f}s - {seg['end']:.3f}s (时长: {seg['end']-seg['start']:.3f}s)")
+            
+            # 转换为导出函数需要的格式
+            segments_for_remove = [(seg["start"], seg["end"]) for seg in merged_segments]
+            
+            # 导出视频
+            logger.info("开始导出处理后的视频...")
             exported_files = export_keep_ranges_as_files(recording_file, segments_for_remove, output_dir)
+            logger.info(f"视频导出完成，生成 {len(exported_files)} 个文件")
             
             # 清理 normalize 产生的临时文件夹
             if temp_dir:
+                logger.info("清理临时文件夹...")
                 cleanup_temp_folder(temp_dir)
             
             if exported_files:
+                logger.info(f"处理完成: {os.path.basename(recording_file)} -> {len(exported_files)} 个输出文件")
                 return {
                     'game_name': os.path.basename(recording_file),
                     'target_video': exported_files[0],
                     'segments_count': len(exported_files)
                 }
             else:
+                logger.warning(f"处理完成但未生成输出文件: {os.path.basename(recording_file)}")
                 return {
                     'game_name': os.path.basename(recording_file),
                     'target_video': None,
